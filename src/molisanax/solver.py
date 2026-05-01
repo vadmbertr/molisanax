@@ -1,4 +1,18 @@
-"""ODE and SDE solvers: Euler and Heun with lax.scan integration loop."""
+"""ODE and SDE solvers: Euler and Heun with a unified lax.scan integration loop.
+
+Term API
+--------
+ODE term: ``f(t, y, args) -> Float[Array, "2"]``
+    Returns velocity [dlat/dt, dlon/dt] in degrees/second.
+
+SDE term: ``f(t, y, args) -> tuple[Float[Array, "2"], Float[Array, "2"]]``
+    Returns (drift, noise_amplitude), both in degrees/second.
+    The SDE step is: dy = (drift + noise_amplitude * z) * dt
+    where z ~ N(0, I_2) is drawn fresh at each step by the solver.
+
+The solver detects which mode to use by probing the term's output structure
+with jax.eval_shape before entering the jit-compiled scan loop.
+"""
 
 from __future__ import annotations
 
@@ -16,16 +30,15 @@ __all__ = [
     "AbstractSolver",
     "Euler",
     "Heun",
-    "solve_ode",
-    "solve_sde",
+    "solve",
 ]
 
 
 class AbstractSolver(eqx.Module):
-    """Abstract base for fixed-step ODE solvers."""
+    """Abstract base for fixed-step ODE/SDE solvers."""
 
     @abc.abstractmethod
-    def step(
+    def ode_step(
         self,
         term: Callable,
         t: Float[Array, ""],
@@ -33,28 +46,27 @@ class AbstractSolver(eqx.Module):
         dt: Float[Array, ""],
         args: PyTree,
     ) -> Float[Array, "2"]:
-        """Advance state y by one step of size dt using the given term."""
+        """Advance ODE state y by one step of size dt."""
         ...
 
     @abc.abstractmethod
     def sde_step(
         self,
-        drift: Callable,
-        diffusion: Callable,
+        term: Callable,
         t: Float[Array, ""],
         y: Float[Array, "2"],
         dt: Float[Array, ""],
         args: PyTree,
-        dw: Float[Array, " n"],
+        z: Float[Array, "2"],
     ) -> Float[Array, "2"]:
-        """Advance SDE state y by one step. dw is the noise increment ~ N(0, sqrt(dt))."""
+        """Advance SDE state y by one step. z ~ N(0, I_2) is provided by the solver."""
         ...
 
 
 class Euler(AbstractSolver):
-    """Euler (explicit first-order) solver for ODE and SDE (Euler-Maruyama for SDE)."""
+    """Euler / Euler-Maruyama solver."""
 
-    def step(
+    def ode_step(
         self,
         term: Callable,
         t: Float[Array, ""],
@@ -66,23 +78,21 @@ class Euler(AbstractSolver):
 
     def sde_step(
         self,
-        drift: Callable,
-        diffusion: Callable,
+        term: Callable,
         t: Float[Array, ""],
         y: Float[Array, "2"],
         dt: Float[Array, ""],
         args: PyTree,
-        dw: Float[Array, " n"],
+        z: Float[Array, "2"],
     ) -> Float[Array, "2"]:
-        det = drift(t, y, args) * dt
-        stoch = diffusion(t, y, args) @ dw
-        return y + det + stoch
+        f, g = term(t, y, args)
+        return y + (f + g * z) * dt
 
 
 class Heun(AbstractSolver):
-    """Heun (explicit second-order) solver. For SDEs uses a Stratonovich-consistent predictor-corrector."""
+    """Heun (explicit second-order) solver."""
 
-    def step(
+    def ode_step(
         self,
         term: Callable,
         t: Float[Array, ""],
@@ -96,109 +106,139 @@ class Heun(AbstractSolver):
 
     def sde_step(
         self,
-        drift: Callable,
-        diffusion: Callable,
+        term: Callable,
         t: Float[Array, ""],
         y: Float[Array, "2"],
         dt: Float[Array, ""],
         args: PyTree,
-        dw: Float[Array, " n"],
+        z: Float[Array, "2"],
     ) -> Float[Array, "2"]:
-        g0 = diffusion(t, y, args)
-        f0 = drift(t, y, args)
-        y_pred = y + f0 * dt + g0 @ dw
-        f1 = drift(t + dt, y_pred, args)
-        g1 = diffusion(t + dt, y_pred, args)
-        det = 0.5 * (f0 + f1) * dt
-        stoch = 0.5 * (g0 + g1) @ dw
-        return y + det + stoch
+        # Predictor (Euler step with the same noise sample z)
+        f0, g0 = term(t, y, args)
+        y_pred = y + (f0 + g0 * z) * dt
+        # Corrector
+        f1, g1 = term(t + dt, y_pred, args)
+        return y + 0.5 * ((f0 + f1) + (g0 + g1) * z) * dt
 
 
-def solve_ode(
-    term: Callable[[Float[Array, ""], Float[Array, "2"], PyTree], Float[Array, "2"]],
+def _is_sde_term(term: Callable, y0: Float[Array, "2"], args: PyTree) -> bool:
+    """Probe term output structure to detect SDE (tuple return) vs ODE (array return)."""
+    dummy_t = jnp.zeros((), dtype=y0.dtype)
+    dummy_y = jnp.zeros_like(y0)
+    out = jax.eval_shape(term, dummy_t, dummy_y, args)
+    return isinstance(out, tuple)
+
+
+def _run_ode(
+    term: Callable,
+    args: PyTree,
+    y0: Float[Array, "2"],
+    ts: Float[Array, " time"],
+    solver: AbstractSolver,
+) -> Float[Array, "time 2"]:
+    dt = ts[1] - ts[0]
+
+    @jax.checkpoint
+    def body(y: Float[Array, "2"], t: Float[Array, ""]) -> tuple:
+        return solver.ode_step(term, t, y, dt, args), solver.ode_step(term, t, y, dt, args)
+
+    # Avoid computing the step twice: carry and output are the same value
+    @jax.checkpoint
+    def body_scan(y: Float[Array, "2"], t: Float[Array, ""]) -> tuple:
+        y_new = solver.ode_step(term, t, y, dt, args)
+        return y_new, y_new
+
+    _, ys = jax.lax.scan(body_scan, y0, ts[:-1])
+    return jnp.concatenate([y0[None], ys], axis=0)
+
+
+def _run_sde(
+    term: Callable,
+    args: PyTree,
+    y0: Float[Array, "2"],
+    ts: Float[Array, " time"],
+    solver: AbstractSolver,
+    key: Key[Array, ""],
+    n_samples: int,
+) -> Float[Array, "samples time 2"]:
+    dt = ts[1] - ts[0]
+    n_steps = ts.shape[0] - 1
+
+    def solve_one(subkey: Key[Array, ""]) -> Float[Array, "time 2"]:
+        # Pre-sample all noise increments z_k ~ N(0, I_2), one per step
+        noise = jr.normal(subkey, shape=(n_steps, 2), dtype=y0.dtype)
+
+        @jax.checkpoint
+        def body_scan(
+            y: Float[Array, "2"],
+            inputs: tuple,
+        ) -> tuple:
+            t, z = inputs
+            y_new = solver.sde_step(term, t, y, dt, args, z)
+            return y_new, y_new
+
+        _, ys = jax.lax.scan(body_scan, y0, (ts[:-1], noise))
+        return jnp.concatenate([y0[None], ys], axis=0)
+
+    keys = jr.split(key, n_samples)
+    return jax.vmap(solve_one)(keys)
+
+
+def solve(
+    term: Callable,
     args: PyTree,
     y0: Float[Array, "2"],
     ts: Float[Array, " time"],
     solver: AbstractSolver | None = None,
     *,
+    key: Key[Array, ""] | None = None,
+    n_samples: int | None = None,
     adjoint: Literal["recursive_checkpoint", "forward"] = "recursive_checkpoint",
-) -> Float[Array, "time 2"]:
-    """Integrate an ODE from ts[0] to ts[-1] with constant step size.
+) -> Float[Array, "time 2"] | Float[Array, "samples time 2"]:
+    """Integrate a trajectory from ts[0] to ts[-1] with constant step size.
+
+    Automatically detects ODE vs SDE mode from the term's return type:
+
+    - ODE: ``term(t, y, args) -> Float[Array, "2"]``
+      Returns a single velocity array. Use with ``jax.grad`` or ``jax.jvp``.
+
+    - SDE: ``term(t, y, args) -> tuple[Float[Array, "2"], Float[Array, "2"]]``
+      Returns ``(drift, noise_amplitude)``. The solver draws ``z ~ N(0, I_2)``
+      at each step and computes ``dy = (drift + noise_amplitude * z) * dt``.
+      Requires ``key`` to be provided.
 
     Args:
-        term: Dynamics callable ``f(t, y, args) -> dy/dt`` in degrees/second.
-        args: Arbitrary JAX pytree passed through to term unchanged.
+        term: Dynamics callable. Return type determines ODE vs SDE mode.
+        args: Arbitrary JAX pytree passed through to term (e.g. a Dataset).
         y0: Initial state [lat, lon] in degrees, shape (2,).
         ts: Equally spaced output times in seconds, shape (T,).
-        solver: Solver instance (default: Heun()).
-        adjoint: AD strategy. "recursive_checkpoint" differentiates through lax.scan
-            (discretise-then-optimise). "forward" is compatible with jax.jvp.
+        solver: Solver instance. Defaults to Heun().
+        key: PRNG key. Required for SDE mode. Ignored for ODE.
+        n_samples: Number of independent realisations (SDE only).
+            If None and SDE mode is detected, defaults to 1 (single trajectory).
+        adjoint: AD strategy for ODE mode. "recursive_checkpoint" differentiates
+            through lax.scan (discretise-then-optimise). "forward" is compatible
+            with jax.jvp. Ignored for SDE (use forward-mode for SDE gradients).
 
     Returns:
-        Trajectory array of shape (T, 2) where output[0] == y0.
+        - ODE: Float[Array, "time 2"] — shape (T, 2).
+        - SDE with n_samples=None: Float[Array, "time 2"] — single realisation, shape (T, 2).
+        - SDE with n_samples=N: Float[Array, "samples time 2"] — ensemble, shape (N, T, 2).
     """
     if solver is None:
         solver = Heun()
 
-    dt = ts[1] - ts[0]
-
-    @jax.checkpoint
-    def body(y: Float[Array, "2"], t: Float[Array, ""]) -> tuple[Float[Array, "2"], Float[Array, "2"]]:
-        y_new = solver.step(term, t, y, dt, args)
-        return y_new, y_new
-
-    _, ys = jax.lax.scan(body, y0, ts[:-1])
-    return jnp.concatenate([y0[None], ys], axis=0)
-
-
-def solve_sde(
-    drift: Callable[[Float[Array, ""], Float[Array, "2"], PyTree], Float[Array, "2"]],
-    diffusion: Callable[[Float[Array, ""], Float[Array, "2"], PyTree], Float[Array, "2 n"]],
-    args: PyTree,
-    y0: Float[Array, "2"],
-    ts: Float[Array, " time"],
-    key: Key[Array, ""],
-    n_samples: int,
-    n_noise: int,
-    solver: AbstractSolver | None = None,
-) -> Float[Array, "samples time 2"]:
-    """Integrate an SDE ensemble from ts[0] to ts[-1] with constant step size.
-
-    Args:
-        drift: Deterministic term ``f(t, y, args) -> dy/dt`` in degrees/second.
-        diffusion: Stochastic term ``g(t, y, args) -> matrix of shape (2, n_noise)``.
-        args: JAX pytree passed through to drift and diffusion.
-        y0: Initial state [lat, lon] in degrees, shape (2,).
-        ts: Equally spaced output times in seconds, shape (T,).
-        key: PRNG key for noise generation.
-        n_samples: Number of independent realisations.
-        n_noise: Dimension of the noise process (columns of diffusion matrix).
-        solver: Solver instance (default: Heun()).
-
-    Returns:
-        Ensemble trajectories of shape (n_samples, T, 2).
-    """
-    if solver is None:
-        solver = Heun()
-
-    dt = ts[1] - ts[0]
-    n_steps = ts.shape[0] - 1
-
-    def solve_one(subkey: Key[Array, ""]) -> Float[Array, "time 2"]:
-        # Pre-sample all noise increments: dW_k ~ N(0, I) * sqrt(dt)
-        noise = jr.normal(subkey, shape=(n_steps, n_noise)) * jnp.sqrt(dt)
-
-        @jax.checkpoint
-        def body(
-            y: Float[Array, "2"],
-            inputs: tuple[Float[Array, ""], Float[Array, " n"]],
-        ) -> tuple[Float[Array, "2"], Float[Array, "2"]]:
-            t, dw = inputs
-            y_new = solver.sde_step(drift, diffusion, t, y, dt, args, dw)
-            return y_new, y_new
-
-        _, ys = jax.lax.scan(body, y0, (ts[:-1], noise))
-        return jnp.concatenate([y0[None], ys], axis=0)
-
-    keys = jr.split(key, n_samples)
-    return jax.vmap(solve_one)(keys)
+    if _is_sde_term(term, y0, args):
+        if key is None:
+            raise ValueError(
+                "SDE term detected (term returns a tuple) but no PRNG key was provided. "
+                "Pass key=jax.random.key(seed)."
+            )
+        n = n_samples if n_samples is not None else 1
+        ensemble = _run_sde(term, args, y0, ts, solver, key, n)
+        # Return (T, 2) when caller did not request an ensemble
+        if n_samples is None:
+            return ensemble[0]
+        return ensemble
+    else:
+        return _run_ode(term, args, y0, ts, solver)

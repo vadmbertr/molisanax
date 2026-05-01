@@ -6,11 +6,12 @@
 
 ## Project Status
 
-**v0.1.0 — first iteration.** Core functionality is implemented and tested:
-- Bilinear interpolation of rectilinear A-grid forcing fields
-- Euler and Heun ODE/SDE solvers with constant step size
+**v0.1.0 — second iteration.** Core functionality implemented and tested (73 tests):
+- Bilinear interpolation of rectilinear A-grid forcing fields, with neighbourhood extraction
+- Unified `solve()` function — automatically detects ODE vs SDE from the term's return type
+- Euler and Heun solvers with constant step size; noise drawn internally for SDE
 - Geographic unit conversions (metres ↔ degrees)
-- Along-trajectory metrics (separation distance, normalised separation, Liu Index)
+- Along-trajectory metrics with optional ensemble (vmap) mode
 - xarray (zarr/netCDF) dataset loading
 
 See [`docs/project_status.md`](docs/project_status.md) for current capabilities and known limitations.
@@ -34,46 +35,52 @@ pip install -e ".[dev]"
 
 ### ODE simulation (deterministic)
 
+A term returns a single velocity array — `solve()` detects ODE mode automatically.
+
 ```python
 import jax.numpy as jnp
-from molisanax import solve_ode, Heun
+from molisanax import solve, Heun, meters_to_degrees
 
-# User-supplied term: f(t, y, args) -> velocity [dlat/dt, dlon/dt] in degrees/second
 def my_term(t, y, args):
     dataset = args
     lat, lon = y[0], y[1]
     u = dataset["u"].interp(t, lat, lon)   # eastward velocity, m/s
     v = dataset["v"].interp(t, lat, lon)   # northward velocity, m/s
-    from molisanax import meters_to_degrees
-    return meters_to_degrees(jnp.array([v, u]), lat)
+    return meters_to_degrees(jnp.array([v, u]), lat)  # → deg/s
 
-# Time axis in seconds (equally spaced)
 ts = jnp.linspace(0.0, 86400.0 * 5, 121)  # 5 days, 1-hour steps
+y0 = jnp.array([48.0, -4.0])              # [lat, lon] in degrees
 
-# Initial position [lat, lon] in degrees
-y0 = jnp.array([48.0, -4.0])
-
-# Integrate
-trajectory = solve_ode(my_term, dataset, y0, ts, solver=Heun())
-# trajectory: shape (121, 2) — [lat, lon] at each output time
+trajectory = solve(my_term, dataset, y0, ts, Heun())
+# trajectory: shape (121, 2)
 ```
 
 ### SDE simulation (stochastic ensemble)
 
+A term returning `(drift, noise_amplitude)` triggers SDE mode. The solver draws
+`z ~ N(0, I₂)` at each step and computes `dy = (drift + noise_amplitude * z) * dt`.
+
 ```python
 import jax.random as jr
-from molisanax import solve_sde
 
-def drift(t, y, args):
-    ...  # same as ODE term
-
-def diffusion(t, y, args):
-    sigma = 1e-5  # noise amplitude in degrees/sqrt(s)
-    return sigma * jnp.eye(2)  # shape (2, 2)
+def my_term(t, y, args):
+    dataset = args
+    lat, lon = y[0], y[1]
+    u = dataset["u"].interp(t, lat, lon)
+    v = dataset["v"].interp(t, lat, lon)
+    drift = meters_to_degrees(jnp.array([v, u]), lat)
+    noise_amplitude = jnp.full(2, 1e-5)   # deg/s noise scale per component
+    return drift, noise_amplitude
 
 key = jr.key(0)
-ensemble = solve_sde(drift, diffusion, dataset, y0, ts, key, n_samples=100, n_noise=2)
-# ensemble: shape (100, 121, 2)
+
+# Single stochastic trajectory
+traj = solve(my_term, dataset, y0, ts, key=key)
+# shape (121, 2)
+
+# Ensemble of 100 independent realisations
+ensemble = solve(my_term, dataset, y0, ts, key=key, n_samples=100)
+# shape (100, 121, 2)
 ```
 
 ### Loading forcing fields from xarray
@@ -90,15 +97,26 @@ dataset = Dataset.from_xarray(
 )
 ```
 
+### Neighbourhood extraction
+
+```python
+# Extract a 5×5×5 patch of raw grid values around a query point
+patch = dataset["u"].neighborhood(t, lat, lon, t_window=2, lat_window=2, lon_window=2)
+# shape (5, 5, 5)
+
+# Or for all fields at once
+patches = dataset.neighborhood(t, lat, lon, lat_window=1, lon_window=1)
+# dict[str, Array] with shape (3, 3, 3) per field
+```
+
 ### Geographic conversions
 
 ```python
 from molisanax import meters_to_degrees, degrees_to_meters
 
-# Convert a [north, east] displacement in metres to [dlat, dlon] in degrees
-disp_m = jnp.array([1000.0, 500.0])
+disp_m = jnp.array([1000.0, 500.0])  # [north, east] metres
 lat_ref = jnp.array(45.0)
-disp_deg = meters_to_degrees(disp_m, lat_ref)
+disp_deg = meters_to_degrees(disp_m, lat_ref)   # [dlat, dlon] degrees
 ```
 
 ### Differentiability
@@ -106,76 +124,68 @@ disp_deg = meters_to_degrees(disp_m, lat_ref)
 ```python
 import jax
 
-# Reverse-mode gradient through the solver
-loss = lambda y0: solve_ode(my_term, dataset, y0, ts).sum()
-grad = jax.grad(loss)(y0)
+# Reverse-mode gradient through the ODE solver
+grad = jax.grad(lambda y0: solve(my_ode_term, dataset, y0, ts).sum())(y0)
 
 # Forward-mode JVP
-traj, tangent = jax.jvp(lambda y0: solve_ode(my_term, dataset, y0, ts), (y0,), (jnp.ones(2),))
+traj, tangent = jax.jvp(lambda y0: solve(my_ode_term, dataset, y0, ts), (y0,), (jnp.ones(2),))
 ```
 
 ### Trajectory metrics
 
 ```python
 from molisanax import separation_distance, normalized_separation_distance, liu_index
-import jax
 
 # Single-trajectory metrics
-sep = separation_distance(trajectory, reference_trajectory)     # shape (T,), metres
-nsd = normalized_separation_distance(trajectory, reference)     # shape (T,), dimensionless
-li  = liu_index(trajectory, reference)                         # shape (T,), dimensionless
+sep = separation_distance(trajectory, reference)          # (T,), metres
+nsd = normalized_separation_distance(trajectory, reference)  # (T,), dimensionless
+li  = liu_index(trajectory, reference)                    # (T,), dimensionless
 
-# Ensemble metrics via vmap
-ensemble_sep = jax.vmap(lambda y: separation_distance(y, reference))(ensemble)
-# shape (n_samples, T)
+# Ensemble metrics — vmap handled automatically
+sep_ens = separation_distance(ensemble, reference, ensemble=True)  # (S, T)
+li_ens  = liu_index(ensemble, reference, ensemble=True)            # (S, T)
 ```
 
 ## API Reference
 
-### Solvers
+### Solver
 
-| Function | Description |
-|---|---|
-| `solve_ode(term, args, y0, ts, solver, *, adjoint)` | Integrate ODE, return `(T, 2)` trajectory |
-| `solve_sde(drift, diffusion, args, y0, ts, key, n_samples, n_noise, solver)` | Integrate SDE ensemble, return `(S, T, 2)` |
+```
+solve(term, args, y0, ts, solver=Heun(), *, key=None, n_samples=None, adjoint="recursive_checkpoint")
+```
 
-**Term signature**: `f(t: float_scalar, y: Float[Array, "2"], args: PyTree) -> Float[Array, "2"]`  
-Return value is velocity `[dlat/dt, dlon/dt]` in **degrees per second**.
+| Term return type | Mode | Output shape |
+|---|---|---|
+| `Float[Array, "2"]` | ODE | `(T, 2)` |
+| `(Float[Array, "2"], Float[Array, "2"])` | SDE (`key` required) | `(T, 2)` if `n_samples=None`, else `(S, T, 2)` |
+
+**Term signature**: `f(t: scalar, y: Float[Array, "2"], args: PyTree) -> ...`
+Returns velocity `[dlat/dt, dlon/dt]` in **degrees per second** (ODE) or `(drift, noise_amplitude)` both in deg/s (SDE).
 
 **Solvers**: `Euler()`, `Heun()` (default)
 
-**Adjoint modes**: `"recursive_checkpoint"` (default, reverse-mode via `lax.scan`), `"forward"` (use with `jax.jvp`)
-
 ### Forcing
 
-| Class | Description |
+| | |
 |---|---|
-| `Field` | Scalar field on a `(time, lat, lon)` A-grid. Call `.interp(t, lat, lon)` to interpolate. |
-| `Dataset` | Collection of `Field`s. Load via `Dataset.from_xarray(ds, fields, coordinates)`. |
-
-### Geographic utilities
-
-| Function | Description |
-|---|---|
-| `meters_to_degrees(arr, lat)` | Convert `[north, east]` metres → `[dlat, dlon]` degrees |
-| `degrees_to_meters(arr, lat)` | Inverse of the above |
-| `haversine(y1, y2)` | Great-circle distance in metres between two `[lat, lon]` points |
+| `Field.interp(t, lat, lon)` | Trilinear interpolation → scalar |
+| `Field.neighborhood(t, lat, lon, t_window, lat_window, lon_window)` | Raw grid patch via `lax.dynamic_slice` |
+| `Dataset.from_xarray(ds, fields, coordinates, dtype)` | Load from xarray Dataset |
+| `Dataset.neighborhood(...)` | Neighbourhood for all fields → `dict[str, Array]` |
 
 ### Metrics
 
-All metrics accept trajectories of shape `(T, 2)`. Use `jax.vmap` for ensemble shapes `(S, T, 2)`.
+All accept `ensemble=False` (single trajectory) or `ensemble=True` (auto-vmaps over first axis).
 
-| Function | Formula |
+| | |
 |---|---|
-| `separation_distance(y, y_ref)` | `haversine(y[t], y_ref[t])` at each t, in metres |
-| `normalized_separation_distance(y, y_ref)` | `sep(t) / cumsum(arc_length_ref)[t]` |
-| `liu_index(y, y_ref)` | `cumsum(sep)[t] / cumsum(arc_length_ref)[t]` |
+| `separation_distance(y, y_ref)` | Haversine at each step, metres |
+| `normalized_separation_distance(y, y_ref)` | `sep(t) / cumsum_ref_arc(t)` |
+| `liu_index(y, y_ref)` | `cumsum_sep(t) / cumsum_ref_arc(t)` |
 
 ## Design
 
-`molisanax` has no diffrax or interpax dependency. The solver uses `jax.lax.scan` for the time-stepping loop, which JAX automatically differentiates in both forward and reverse mode. The `jax.checkpoint` decorator on the scan body provides memory-efficient reverse-mode AD (rematerialisation).
-
-Forcing interpolation is a native JAX trilinear implementation (linear in time, bilinear in lat/lon) that is jit-compatible and differentiable with respect to position.
+No diffrax or interpax dependency. The integration loop uses `jax.lax.scan` with `jax.checkpoint` on the body for memory-efficient reverse-mode AD. ODE/SDE mode is detected by probing the term with `jax.eval_shape` before entering jit.
 
 ## Running Tests
 

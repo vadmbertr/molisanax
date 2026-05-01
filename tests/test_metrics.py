@@ -9,82 +9,91 @@ from molisanax.metrics import liu_index, normalized_separation_distance, separat
 
 
 class TestSeparationDistance:
-    def test_identical_trajectories(self):
+    def test_identical_trajectories_zero(self):
         y = jnp.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
-        dist = separation_distance(y, y)
-        assert jnp.allclose(dist, jnp.zeros(3), atol=1e-3)
+        assert jnp.allclose(separation_distance(y, y), jnp.zeros(3), atol=1e-3)
 
     def test_shape(self):
-        y = jnp.ones((10, 2))
-        y_ref = jnp.zeros((10, 2))
-        dist = separation_distance(y, y_ref)
-        assert dist.shape == (10,)
+        assert separation_distance(jnp.ones((10, 2)), jnp.zeros((10, 2))).shape == (10,)
 
     def test_known_distance(self):
-        # Two points 1 degree latitude apart at equator
         y = jnp.array([[0.0, 0.0]])
         y_ref = jnp.array([[1.0, 0.0]])
-        dist = separation_distance(y, y_ref)
         expected = EARTH_RADIUS * jnp.radians(1.0)
-        assert float(dist[0]) == pytest.approx(expected, rel=1e-4)
+        assert float(separation_distance(y, y_ref)[0]) == pytest.approx(expected, rel=1e-4)
 
-    def test_grad_is_finite(self):
+    def test_grad_finite(self):
         y_ref = jnp.zeros((5, 2))
         y = jnp.ones((5, 2)) * 0.1
-
-        g = jax.grad(lambda traj: separation_distance(traj, y_ref).sum())(y)
+        g = jax.grad(lambda t: separation_distance(t, y_ref).sum())(y)
         assert jnp.all(jnp.isfinite(g))
 
-    def test_vmap_over_ensemble(self):
+    def test_ensemble_flag_shape(self):
         ensemble = jnp.ones((4, 10, 2))
         y_ref = jnp.zeros((10, 2))
-        dists = jax.vmap(lambda y: separation_distance(y, y_ref))(ensemble)
+        dists = separation_distance(ensemble, y_ref, ensemble=True)
         assert dists.shape == (4, 10)
+
+    def test_ensemble_consistent_with_manual_vmap(self):
+        ensemble = jnp.ones((3, 5, 2)) * 0.1
+        y_ref = jnp.zeros((5, 2))
+        auto = separation_distance(ensemble, y_ref, ensemble=True)
+        manual = jax.vmap(lambda y: separation_distance(y, y_ref))(ensemble)
+        assert jnp.allclose(auto, manual)
 
 
 class TestNormalizedSeparationDistance:
-    def test_zero_separation_gives_zero(self):
+    def test_identical_zero(self):
         y = jnp.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
         nsd = normalized_separation_distance(y, y)
         assert jnp.allclose(nsd, jnp.zeros(3), atol=1e-3)
 
     def test_shape(self):
-        y = jnp.ones((8, 2))
-        y_ref = jnp.zeros((8, 2))
-        nsd = normalized_separation_distance(y, y_ref)
-        assert nsd.shape == (8,)
+        assert normalized_separation_distance(jnp.ones((8, 2)), jnp.zeros((8, 2))).shape == (8,)
 
-    def test_at_t0_ref_length_is_zero_so_result_is_zero(self):
+    def test_at_t0_result_is_zero(self):
         y = jnp.array([[1.0, 0.0], [2.0, 0.0]])
         y_ref = jnp.array([[0.0, 0.0], [1.0, 0.0]])
         nsd = normalized_separation_distance(y, y_ref)
-        # At t=0, cumulative ref arc length = 0 → safe_divide returns 0
         assert float(nsd[0]) == pytest.approx(0.0)
+
+    def test_ensemble_flag_shape(self):
+        ensemble = jnp.ones((5, 6, 2))
+        y_ref = jnp.zeros((6, 2))
+        result = normalized_separation_distance(ensemble, y_ref, ensemble=True)
+        assert result.shape == (5, 6)
 
 
 class TestLiuIndex:
-    def test_identical_trajectories_give_zero(self):
+    def test_identical_zero(self):
         y = jnp.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
-        li = liu_index(y, y)
-        assert jnp.allclose(li, jnp.zeros(3), atol=1e-3)
+        assert jnp.allclose(liu_index(y, y), jnp.zeros(3), atol=1e-3)
 
     def test_shape(self):
-        y = jnp.ones((6, 2))
-        y_ref = jnp.zeros((6, 2))
-        li = liu_index(y, y_ref)
-        assert li.shape == (6,)
+        assert liu_index(jnp.ones((6, 2)), jnp.zeros((6, 2))).shape == (6,)
 
-    def test_increasing_in_time_for_diverging_trajectories(self):
-        # y moves northward, y_ref stays still → separation grows → Liu grows
-        T = 5
-        y = jnp.stack([jnp.arange(T, dtype=float), jnp.zeros(T)], axis=1) * 0.1
+    def test_non_decreasing_for_diverging_trajectories(self):
+        T = 6
+        y = jnp.stack([jnp.arange(T, dtype=float) * 0.1, jnp.zeros(T)], axis=1)
         y_ref = jnp.zeros((T, 2))
         li = liu_index(y, y_ref)
-        # Liu index should be non-decreasing once both trajectories have moved
         assert jnp.all(li[2:] >= li[1:-1] - 1e-6)
 
-    def test_grad_is_finite(self):
+    def test_grad_finite(self):
         y_ref = jnp.array([[0.0, 0.0], [0.1, 0.0], [0.2, 0.0]])
         y = jnp.array([[0.05, 0.0], [0.15, 0.0], [0.25, 0.0]])
-        g = jax.grad(lambda traj: liu_index(traj, y_ref).sum())(y)
+        g = jax.grad(lambda t: liu_index(t, y_ref).sum())(y)
         assert jnp.all(jnp.isfinite(g))
+
+    def test_ensemble_flag_shape(self):
+        ensemble = jnp.ones((3, 7, 2)) * 0.2
+        y_ref = jnp.zeros((7, 2))
+        result = liu_index(ensemble, y_ref, ensemble=True)
+        assert result.shape == (3, 7)
+
+    def test_ensemble_consistent_with_manual_vmap(self):
+        ensemble = jnp.ones((4, 5, 2)) * 0.1
+        y_ref = jnp.zeros((5, 2))
+        auto = liu_index(ensemble, y_ref, ensemble=True)
+        manual = jax.vmap(lambda y: liu_index(y, y_ref))(ensemble)
+        assert jnp.allclose(auto, manual)
