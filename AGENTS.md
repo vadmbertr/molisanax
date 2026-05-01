@@ -10,8 +10,9 @@ The purpose of the project is to implement in JAX a differentiable lagrangian si
 
 ## Dependencies
 - **Uses**: 
-JAX and Equinox are mandatory dependencies; optional dependencies (if deemed useful) from the Equinox ecosystem are `diffrax`, `quax`, `unxt`, and `lineax`.
+JAX, Equinox, and jaxtyping are mandatory dependencies; optional dependencies (if deemed useful) are listed as inspiration sources in `docs/project_plan.md`. 
 Should use a linter and a formatter, and `pyright` as a static type checker.
+Typing is mandatory.
 - **Used by**: regression tests, and coding-agent hardening exercises.
 
 ## Invariants
