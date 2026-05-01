@@ -4,7 +4,48 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from molisanax.interpolation import bilinear_interp_2d, linear_interp_1d, spatiotemporal_interp
+from molisanax.interpolation import (
+    _index_and_weight,
+    bilinear_interp_2d,
+    linear_interp_1d,
+    spatiotemporal_interp,
+)
+
+
+class TestIndexAndWeight:
+    """Unit tests for the equally-spaced floor-index helper."""
+
+    def test_at_first_node(self):
+        coords = jnp.array([0.0, 1.0, 2.0])
+        i, w = _index_and_weight(coords, jnp.array(0.0))
+        assert int(i) == 0
+        assert float(w) == pytest.approx(0.0)
+
+    def test_at_last_node(self):
+        coords = jnp.array([0.0, 1.0, 2.0])
+        i, w = _index_and_weight(coords, jnp.array(2.0))
+        assert int(i) == 1          # clamped to n-2
+        assert float(w) == pytest.approx(1.0)
+
+    def test_midpoint(self):
+        coords = jnp.array([0.0, 2.0, 4.0])
+        i, w = _index_and_weight(coords, jnp.array(1.0))
+        assert int(i) == 0
+        assert float(w) == pytest.approx(0.5)
+
+    def test_arbitrary_spacing(self):
+        coords = jnp.array([10.0, 12.5, 15.0])
+        i, w = _index_and_weight(coords, jnp.array(13.75))
+        assert int(i) == 1
+        assert float(w) == pytest.approx(0.5)
+
+    def test_consistent_with_linear_interp(self):
+        # For a linear function values[k] = k, interp should return x exactly
+        coords = jnp.linspace(0.0, 4.0, 5)
+        values = coords  # values[k] = k
+        for xv in [0.3, 1.7, 2.5, 3.9]:
+            result = linear_interp_1d(values, coords, jnp.array(xv))
+            assert float(result) == pytest.approx(xv, rel=1e-5)
 
 
 class TestLinearInterp1D:

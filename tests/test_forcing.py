@@ -114,3 +114,50 @@ class TestDataset:
         )
         assert set(patches.keys()) == {"u", "v"}
         assert patches["u"].shape == (3, 3, 3)
+
+
+class TestDatasetFromArrays:
+    def _coords(self, n=4):
+        t   = np.linspace(0.0, (n - 1) * 3600.0, n)
+        lat = np.linspace(0.0, float(n - 1), n)
+        lon = np.linspace(10.0, 10.0 + float(n - 1), n)
+        return t, lat, lon
+
+    def test_builds_dataset(self):
+        t, lat, lon = self._coords()
+        u = np.ones((4, 4, 4), dtype=np.float32)
+        dataset = Dataset.from_arrays({"u": u}, t=t, lat=lat, lon=lon)
+        assert "u" in dataset.fields
+        assert isinstance(dataset["u"], Field)
+
+    def test_interp_uniform_field(self):
+        t, lat, lon = self._coords()
+        u = np.ones((4, 4, 4), dtype=np.float32)
+        dataset = Dataset.from_arrays({"u": u}, t=t, lat=lat, lon=lon)
+        v = dataset["u"].interp(jnp.array(1800.0), jnp.array(1.5), jnp.array(11.5))
+        assert float(v) == pytest.approx(1.0, abs=1e-5)
+
+    def test_accepts_jax_arrays(self):
+        t   = jnp.linspace(0.0, 3 * 3600.0, 4)
+        lat = jnp.linspace(0.0, 3.0, 4)
+        lon = jnp.linspace(10.0, 13.0, 4)
+        u   = jnp.zeros((4, 4, 4))
+        dataset = Dataset.from_arrays({"u": u}, t=t, lat=lat, lon=lon)
+        assert dataset["u"].values.shape == (4, 4, 4)
+
+    def test_from_arrays_and_from_xarray_agree(self):
+        """from_arrays and from_xarray must produce identical field values."""
+        ds = make_synthetic_ds()
+        ds_dataset = Dataset.from_xarray(
+            ds,
+            fields={"u": "u"},
+            coordinates={"time": "time", "lat": "lat", "lon": "lon"},
+        )
+        t = ds["time"].values.astype("datetime64[s]").astype(np.int64).astype(np.float32)
+        arr_dataset = Dataset.from_arrays(
+            {"u": ds["u"].values},
+            t=t,
+            lat=ds["lat"].values,
+            lon=ds["lon"].values,
+        )
+        assert jnp.allclose(ds_dataset["u"].values, arr_dataset["u"].values)
