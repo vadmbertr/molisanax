@@ -161,7 +161,7 @@ class TestSolveSDE:
         ode_traj = solve(uniform_ode_term(1e-4, 2e-4), None, y0, ts)
         assert jnp.allclose(ensemble.mean(axis=0), ode_traj, atol=1e-4)
 
-    def test_missing_key_raises(self):
+    def test_missing_key_and_noise_raises(self):
         y0 = jnp.zeros(2)
         ts = self._ts()
         with pytest.raises(ValueError, match="key"):
@@ -174,3 +174,55 @@ class TestSolveSDE:
         fn = jax.jit(lambda k: solve(term, None, y0, ts, key=k, n_samples=3))
         traj = fn(jax.random.key(0))
         assert traj.shape == (3, len(ts), 2)
+
+    # --- pre-sampled noise ---
+
+    def test_presampled_noise_single_shape(self):
+        y0 = jnp.zeros(2)
+        ts = self._ts()
+        n_steps = len(ts) - 1
+        noise = jnp.zeros((n_steps, 2))  # zero noise → matches ODE
+        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, noise=noise)
+        assert traj.shape == (len(ts), 2)
+
+    def test_presampled_noise_single_zero_matches_ode(self):
+        y0 = jnp.array([10.0, 20.0])
+        ts = self._ts(n=50)
+        n_steps = len(ts) - 1
+        noise = jnp.zeros((n_steps, 2))
+        sde_traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, noise=noise)
+        ode_traj = solve(uniform_ode_term(1e-4, 2e-4), None, y0, ts)
+        assert jnp.allclose(sde_traj, ode_traj, atol=1e-5)
+
+    def test_presampled_noise_ensemble_shape(self):
+        y0 = jnp.zeros(2)
+        ts = self._ts()
+        n_steps = len(ts) - 1
+        noise = jnp.zeros((5, n_steps, 2))
+        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, noise=noise)
+        assert traj.shape == (5, len(ts), 2)
+
+    def test_presampled_noise_no_key_needed(self):
+        # noise= provided, no key → should not raise
+        y0 = jnp.zeros(2)
+        ts = self._ts()
+        n_steps = len(ts) - 1
+        noise = jax.random.normal(jax.random.key(7), (n_steps, 2))
+        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, noise=noise)
+        assert jnp.all(jnp.isfinite(traj))
+
+    def test_presampled_vs_autosampled_same_noise_same_traj(self):
+        # auto-sample with key, extract the noise, re-run with explicit noise → identical output
+        y0 = jnp.array([10.0, 20.0])
+        ts = self._ts(n=20)
+        key = jax.random.key(42)
+        n_steps = len(ts) - 1
+
+        # Auto-sample
+        traj_auto = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, key=key)
+
+        # Reproduce the exact same noise that auto-sample uses: (1, n_steps, 2)[0]
+        noise_repro = jax.random.normal(key, shape=(1, n_steps, 2), dtype=y0.dtype)[0]
+        traj_noise = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, noise=noise_repro)
+
+        assert jnp.allclose(traj_auto, traj_noise, atol=1e-6)

@@ -8,7 +8,8 @@ ODE term: ``f(t, y, args) -> Float[Array, "2"]``
 SDE term: ``f(t, y, args) -> tuple[Float[Array, "2"], Float[Array, "2"]]``
     Returns (drift, noise_amplitude), both in degrees/second.
     The SDE step is: dy = (drift + noise_amplitude * z) * dt
-    where z ~ N(0, I_2) is drawn fresh at each step by the solver.
+    where z is a pre-sampled standard-normal vector passed from outside the
+    scan loop. All noise is drawn before integration begins.
 
 The solver detects which mode to use by probing the term's output structure
 with jax.eval_shape before entering the jit-compiled scan loop.
@@ -59,7 +60,7 @@ class AbstractSolver(eqx.Module):
         args: PyTree,
         z: Float[Array, "2"],
     ) -> Float[Array, "2"]:
-        """Advance SDE state y by one step. z ~ N(0, I_2) is provided by the solver."""
+        """Advance SDE state y by one step using pre-sampled noise z ~ N(0, I_2)."""
         ...
 
 
@@ -113,10 +114,10 @@ class Heun(AbstractSolver):
         args: PyTree,
         z: Float[Array, "2"],
     ) -> Float[Array, "2"]:
-        # Predictor (Euler step with the same noise sample z)
+        # Predictor using the pre-sampled noise z
         f0, g0 = term(t, y, args)
         y_pred = y + (f0 + g0 * z) * dt
-        # Corrector
+        # Corrector — reuse the same z
         f1, g1 = term(t + dt, y_pred, args)
         return y + 0.5 * ((f0 + f1) + (g0 + g1) * z) * dt
 
@@ -140,15 +141,10 @@ def _run_ode(
 
     @jax.checkpoint
     def body(y: Float[Array, "2"], t: Float[Array, ""]) -> tuple:
-        return solver.ode_step(term, t, y, dt, args), solver.ode_step(term, t, y, dt, args)
-
-    # Avoid computing the step twice: carry and output are the same value
-    @jax.checkpoint
-    def body_scan(y: Float[Array, "2"], t: Float[Array, ""]) -> tuple:
         y_new = solver.ode_step(term, t, y, dt, args)
         return y_new, y_new
 
-    _, ys = jax.lax.scan(body_scan, y0, ts[:-1])
+    _, ys = jax.lax.scan(body, y0, ts[:-1])
     return jnp.concatenate([y0[None], ys], axis=0)
 
 
@@ -158,30 +154,22 @@ def _run_sde(
     y0: Float[Array, "2"],
     ts: Float[Array, " time"],
     solver: AbstractSolver,
-    key: Key[Array, ""],
-    n_samples: int,
+    noise: Float[Array, "samples steps 2"],
 ) -> Float[Array, "samples time 2"]:
+    """Integrate an SDE ensemble. noise must be pre-sampled: shape (S, n_steps, 2)."""
     dt = ts[1] - ts[0]
-    n_steps = ts.shape[0] - 1
 
-    def solve_one(subkey: Key[Array, ""]) -> Float[Array, "time 2"]:
-        # Pre-sample all noise increments z_k ~ N(0, I_2), one per step
-        noise = jr.normal(subkey, shape=(n_steps, 2), dtype=y0.dtype)
-
+    def solve_one(noise_i: Float[Array, "steps 2"]) -> Float[Array, "time 2"]:
         @jax.checkpoint
-        def body_scan(
-            y: Float[Array, "2"],
-            inputs: tuple,
-        ) -> tuple:
+        def body(y: Float[Array, "2"], inputs: tuple) -> tuple:
             t, z = inputs
             y_new = solver.sde_step(term, t, y, dt, args, z)
             return y_new, y_new
 
-        _, ys = jax.lax.scan(body_scan, y0, (ts[:-1], noise))
+        _, ys = jax.lax.scan(body, y0, (ts[:-1], noise_i))
         return jnp.concatenate([y0[None], ys], axis=0)
 
-    keys = jr.split(key, n_samples)
-    return jax.vmap(solve_one)(keys)
+    return jax.vmap(solve_one)(noise)
 
 
 def solve(
@@ -193,6 +181,7 @@ def solve(
     *,
     key: Key[Array, ""] | None = None,
     n_samples: int | None = None,
+    noise: Float[Array, "..."] | None = None,
     adjoint: Literal["recursive_checkpoint", "forward"] = "recursive_checkpoint",
 ) -> Float[Array, "time 2"] | Float[Array, "samples time 2"]:
     """Integrate a trajectory from ts[0] to ts[-1] with constant step size.
@@ -200,12 +189,23 @@ def solve(
     Automatically detects ODE vs SDE mode from the term's return type:
 
     - ODE: ``term(t, y, args) -> Float[Array, "2"]``
-      Returns a single velocity array. Use with ``jax.grad`` or ``jax.jvp``.
+      Returns a single velocity. ``key``, ``n_samples``, and ``noise`` are ignored.
 
     - SDE: ``term(t, y, args) -> tuple[Float[Array, "2"], Float[Array, "2"]]``
-      Returns ``(drift, noise_amplitude)``. The solver draws ``z ~ N(0, I_2)``
-      at each step and computes ``dy = (drift + noise_amplitude * z) * dt``.
-      Requires ``key`` to be provided.
+      Returns ``(drift, noise_amplitude)``, both in deg/s.
+      Step: ``dy = (drift + noise_amplitude * z) * dt``.
+      All noise samples ``z`` are drawn **before** the integration loop begins.
+
+    Noise for SDE mode can be supplied in two ways:
+
+    1. **Pre-sampled** (recommended): pass ``noise`` directly.
+       - Shape ``(n_steps, 2)`` → single realisation, returns ``(T, 2)``.
+       - Shape ``(S, n_steps, 2)`` → ensemble, returns ``(S, T, 2)``.
+       ``key`` is not needed when ``noise`` is provided.
+
+    2. **Auto-sampled**: pass ``key`` (and optionally ``n_samples``).
+       A single ``jax.random.normal`` call draws the full
+       ``(n_samples, n_steps, 2)`` array before vmap and scan.
 
     Args:
         term: Dynamics callable. Return type determines ODE vs SDE mode.
@@ -213,32 +213,46 @@ def solve(
         y0: Initial state [lat, lon] in degrees, shape (2,).
         ts: Equally spaced output times in seconds, shape (T,).
         solver: Solver instance. Defaults to Heun().
-        key: PRNG key. Required for SDE mode. Ignored for ODE.
-        n_samples: Number of independent realisations (SDE only).
-            If None and SDE mode is detected, defaults to 1 (single trajectory).
-        adjoint: AD strategy for ODE mode. "recursive_checkpoint" differentiates
-            through lax.scan (discretise-then-optimise). "forward" is compatible
-            with jax.jvp. Ignored for SDE (use forward-mode for SDE gradients).
+        key: PRNG key for auto-sampling noise. Required for SDE when noise=None.
+        n_samples: Number of realisations for auto-sampled SDE. Defaults to 1.
+        noise: Pre-sampled noise array of shape ``(n_steps, 2)`` (single) or
+            ``(n_samples, n_steps, 2)`` (ensemble). When provided, ``key`` is
+            not used. The noise values are used as-is (any distribution is valid).
+        adjoint: AD strategy for ODE mode only. "recursive_checkpoint" uses
+            lax.scan (discretise-then-optimise). "forward" is compatible with
+            jax.jvp.
 
     Returns:
-        - ODE: Float[Array, "time 2"] — shape (T, 2).
-        - SDE with n_samples=None: Float[Array, "time 2"] — single realisation, shape (T, 2).
-        - SDE with n_samples=N: Float[Array, "samples time 2"] — ensemble, shape (N, T, 2).
+        - ODE: shape ``(T, 2)``.
+        - SDE, single realisation: shape ``(T, 2)``.
+        - SDE, ensemble: shape ``(S, T, 2)``.
     """
     if solver is None:
         solver = Heun()
 
-    if _is_sde_term(term, y0, args):
-        if key is None:
-            raise ValueError(
-                "SDE term detected (term returns a tuple) but no PRNG key was provided. "
-                "Pass key=jax.random.key(seed)."
-            )
-        n = n_samples if n_samples is not None else 1
-        ensemble = _run_sde(term, args, y0, ts, solver, key, n)
-        # Return (T, 2) when caller did not request an ensemble
-        if n_samples is None:
-            return ensemble[0]
-        return ensemble
-    else:
+    if not _is_sde_term(term, y0, args):
         return _run_ode(term, args, y0, ts, solver)
+
+    # SDE path
+    n_steps = ts.shape[0] - 1
+
+    if noise is not None:
+        # User supplied pre-sampled noise
+        if noise.ndim == 2:
+            # (n_steps, 2) → single realisation
+            ensemble = _run_sde(term, args, y0, ts, solver, noise[None])
+            return ensemble[0]
+        else:
+            # (S, n_steps, 2) → ensemble
+            return _run_sde(term, args, y0, ts, solver, noise)
+
+    # Auto-sample: draw all noise in one call before vmap/scan
+    if key is None:
+        raise ValueError(
+            "SDE term detected (term returns a tuple) but neither 'noise' nor 'key' "
+            "was provided. Pass noise=jnp.array(...) or key=jax.random.key(seed)."
+        )
+    n = n_samples if n_samples is not None else 1
+    noise_auto = jr.normal(key, shape=(n, n_steps, 2), dtype=y0.dtype)
+    ensemble = _run_sde(term, args, y0, ts, solver, noise_auto)
+    return ensemble[0] if n_samples is None else ensemble
