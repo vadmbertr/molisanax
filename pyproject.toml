@@ -1,0 +1,34 @@
+[project]
+name = "molisanax"
+version = "0.1.0"
+description = "Differentiable Lagrangian simulator for ocean surface trajectories (JAX/Equinox)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "jax>=0.4.30",
+    "equinox>=0.11.0",
+    "jaxtyping>=0.2.30",
+]
+
+[project.optional-dependencies]
+forcing = ["xarray>=2024.1.0", "zarr>=2.17.0", "netcdf4>=1.6.0", "numpy>=1.26.0"]
+dev = ["pytest>=8.0.0", "ruff>=0.4.0", "pyright>=1.1.360", "xarray>=2024.1.0", "zarr>=2.17.0", "numpy>=1.26.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/molisanax"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+include = ["src/molisanax"]
+strict = false
