@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 
 from ._types import Array, Float
@@ -38,6 +39,54 @@ class Field(eqx.Module):
             t, lat, lon,
         )
 
+    def neighborhood(
+        self,
+        t: Float[Array, ""],
+        lat: Float[Array, ""],
+        lon: Float[Array, ""],
+        t_window: int = 1,
+        lat_window: int = 1,
+        lon_window: int = 1,
+    ) -> Float[Array, "wt wlat wlon"]:
+        """Extract a window of raw grid values centred on the nearest grid point.
+
+        Args:
+            t: Query time in seconds.
+            lat: Query latitude in degrees.
+            lon: Query longitude in degrees.
+            t_window: Half-width of the window along the time axis (window size = 2*t_window+1).
+            lat_window: Half-width along the latitude axis.
+            lon_window: Half-width along the longitude axis.
+
+        Returns:
+            Array of shape (2*t_window+1, 2*lat_window+1, 2*lon_window+1) containing
+            raw field values in the neighbourhood. The window is clamped to the grid
+            boundary when the query point is near the edge.
+        """
+        nt = self.t_coords.shape[0]
+        nlat = self.lat_coords.shape[0]
+        nlon = self.lon_coords.shape[0]
+
+        wt = 2 * t_window + 1
+        wlat = 2 * lat_window + 1
+        wlon = 2 * lon_window + 1
+
+        # Nearest-neighbour index along each axis
+        it = jnp.clip(jnp.searchsorted(self.t_coords, t), 0, nt - 1)
+        ilat = jnp.clip(jnp.searchsorted(self.lat_coords, lat), 0, nlat - 1)
+        ilon = jnp.clip(jnp.searchsorted(self.lon_coords, lon), 0, nlon - 1)
+
+        # Window start index (clamped so the slice stays within bounds)
+        it_start = jnp.clip(it - t_window, 0, nt - wt)
+        ilat_start = jnp.clip(ilat - lat_window, 0, nlat - wlat)
+        ilon_start = jnp.clip(ilon - lon_window, 0, nlon - wlon)
+
+        return jax.lax.dynamic_slice(
+            self.values,
+            (it_start, ilat_start, ilon_start),
+            (wt, wlat, wlon),
+        )
+
 
 class Dataset(eqx.Module):
     """Collection of forcing fields sharing the same (time, lat, lon) grid."""
@@ -46,6 +95,21 @@ class Dataset(eqx.Module):
 
     def __getitem__(self, name: str) -> Field:
         return self.fields[name]
+
+    def neighborhood(
+        self,
+        t: Float[Array, ""],
+        lat: Float[Array, ""],
+        lon: Float[Array, ""],
+        t_window: int = 1,
+        lat_window: int = 1,
+        lon_window: int = 1,
+    ) -> dict[str, Float[Array, "wt wlat wlon"]]:
+        """Extract neighbourhoods for all fields. See Field.neighborhood for details."""
+        return {
+            name: field.neighborhood(t, lat, lon, t_window, lat_window, lon_window)
+            for name, field in self.fields.items()
+        }
 
     @staticmethod
     def from_xarray(
