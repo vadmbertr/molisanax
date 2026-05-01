@@ -11,23 +11,24 @@ __all__ = [
 ]
 
 
-def _floor_index(coords: Float[Array, "n"], x: Float[Array, ""]) -> Int[Array, ""]:
-    """Return clamped floor index i such that coords[i] <= x < coords[i+1]."""
-    # searchsorted returns insertion point; subtract 1 for floor
-    i = jnp.searchsorted(coords, x, side="right") - 1
-    return jnp.clip(i, 0, coords.shape[0] - 2)
+def _index_and_weight(
+    coords: Float[Array, "n"], x: Float[Array, ""]
+) -> tuple[Int[Array, ""], Float[Array, ""]]:
+    """Floor index and linear weight for a point on an equally-spaced 1-D grid.
 
+    For grid spacing dx = coords[1] - coords[0] and origin x0 = coords[0]:
+        i = clip(floor((x - x0) / dx), 0, n-2)
+        w = (x - x0) / dx - i          (= fractional position within cell [i, i+1])
 
-def _lerp_weight(
-    coords: Float[Array, "n"],
-    i: Array,
-    x: Float[Array, ""],
-) -> Float[Array, ""]:
-    """Linear weight w in [0, 1]: x = coords[i] * (1-w) + coords[i+1] * w."""
-    x0 = coords[i]
-    x1 = coords[i + 1]
-    # For equally-spaced grids dx is constant; still using generic formula.
-    return (x - x0) / (x1 - x0)
+    w is in [0, 1) for in-range x; outside that range it extrapolates linearly
+    (same behaviour as the previous searchsorted implementation).
+    """
+    x0 = coords[0]
+    dx = coords[1] - coords[0]
+    u = (x - x0) / dx
+    i = jnp.clip(jnp.floor(u).astype(jnp.int32), 0, coords.shape[0] - 2)
+    w = u - i  # equivalent to (x - (x0 + i*dx)) / dx
+    return i, w
 
 
 def linear_interp_1d(
@@ -35,9 +36,8 @@ def linear_interp_1d(
     coords: Float[Array, "n"],
     x: Float[Array, ""],
 ) -> Float[Array, ""]:
-    """1D linear interpolation. Extrapolates by clamping to boundary values."""
-    i = _floor_index(coords, x)
-    w = _lerp_weight(coords, i, x)
+    """1D linear interpolation on an equally-spaced grid."""
+    i, w = _index_and_weight(coords, x)
     return values[i] * (1.0 - w) + values[i + 1] * w
 
 
@@ -48,20 +48,14 @@ def bilinear_interp_2d(
     lat: Float[Array, ""],
     lon: Float[Array, ""],
 ) -> Float[Array, ""]:
-    """Bilinear interpolation on a 2D rectilinear (lat, lon) grid."""
-    il = _floor_index(lat_coords, lat)
-    jl = _floor_index(lon_coords, lon)
-    wl = _lerp_weight(lat_coords, il, lat)
-    wj = _lerp_weight(lon_coords, jl, lon)
-    v00 = values[il, jl]
-    v10 = values[il + 1, jl]
-    v01 = values[il, jl + 1]
-    v11 = values[il + 1, jl + 1]
+    """Bilinear interpolation on a 2-D equally-spaced rectilinear (lat, lon) grid."""
+    il, wl = _index_and_weight(lat_coords, lat)
+    jl, wj = _index_and_weight(lon_coords, lon)
     return (
-        v00 * (1.0 - wl) * (1.0 - wj)
-        + v10 * wl * (1.0 - wj)
-        + v01 * (1.0 - wl) * wj
-        + v11 * wl * wj
+        values[il,     jl    ] * (1.0 - wl) * (1.0 - wj)
+        + values[il + 1, jl    ] * wl         * (1.0 - wj)
+        + values[il,     jl + 1] * (1.0 - wl) * wj
+        + values[il + 1, jl + 1] * wl         * wj
     )
 
 
@@ -74,9 +68,8 @@ def spatiotemporal_interp(
     lat: Float[Array, ""],
     lon: Float[Array, ""],
 ) -> Float[Array, ""]:
-    """Trilinear interpolation: bilinear in (lat, lon) at bounding time steps, then linear in t."""
-    it = _floor_index(t_coords, t)
-    wt = _lerp_weight(t_coords, it, t)
-    v0 = bilinear_interp_2d(values[it], lat_coords, lon_coords, lat, lon)
+    """Trilinear interpolation: bilinear in (lat, lon) at the two bounding time steps, then linear in t."""
+    it, wt = _index_and_weight(t_coords, t)
+    v0 = bilinear_interp_2d(values[it],     lat_coords, lon_coords, lat, lon)
     v1 = bilinear_interp_2d(values[it + 1], lat_coords, lon_coords, lat, lon)
     return v0 * (1.0 - wt) + v1 * wt
