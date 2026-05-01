@@ -233,26 +233,21 @@ def solve(
     if not _is_sde_term(term, y0, args):
         return _run_ode(term, args, y0, ts, solver)
 
-    # SDE path
+    # SDE path — normalise noise to (S, n_steps, 2) then run once
     n_steps = ts.shape[0] - 1
 
     if noise is not None:
-        # User supplied pre-sampled noise
-        if noise.ndim == 2:
-            # (n_steps, 2) → single realisation
-            ensemble = _run_sde(term, args, y0, ts, solver, noise[None])
-            return ensemble[0]
-        else:
-            # (S, n_steps, 2) → ensemble
-            return _run_sde(term, args, y0, ts, solver, noise)
-
-    # Auto-sample: draw all noise in one call before vmap/scan
-    if key is None:
+        squeeze = noise.ndim == 2          # single realisation → remove S axis on output
+        noise_3d = noise[None] if squeeze else noise
+    elif key is not None:
+        squeeze = n_samples is None
+        n = 1 if squeeze else n_samples
+        noise_3d = jr.normal(key, shape=(n, n_steps, 2), dtype=y0.dtype)
+    else:
         raise ValueError(
             "SDE term detected (term returns a tuple) but neither 'noise' nor 'key' "
             "was provided. Pass noise=jnp.array(...) or key=jax.random.key(seed)."
         )
-    n = n_samples if n_samples is not None else 1
-    noise_auto = jr.normal(key, shape=(n, n_steps, 2), dtype=y0.dtype)
-    ensemble = _run_sde(term, args, y0, ts, solver, noise_auto)
-    return ensemble[0] if n_samples is None else ensemble
+
+    ensemble = _run_sde(term, args, y0, ts, solver, noise_3d)
+    return ensemble[0] if squeeze else ensemble
