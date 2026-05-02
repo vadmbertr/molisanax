@@ -6,13 +6,13 @@
 
 ## Project Status
 
-**v0.1.0 — second iteration.** Core functionality implemented and tested (73 tests):
+**v0.1.0 — third iteration.** Core functionality implemented and tested (87 tests):
 - Bilinear interpolation of rectilinear A-grid forcing fields, with neighbourhood extraction
 - Unified `solve()` function — automatically detects ODE vs SDE from the term's return type
-- Euler and Heun solvers with constant step size; noise drawn internally for SDE
+- Euler and Heun solvers with constant step size; pre-sampled or auto-sampled noise for SDE
 - Geographic unit conversions (metres ↔ degrees)
 - Along-trajectory metrics with optional ensemble (vmap) mode
-- xarray (zarr/netCDF) dataset loading
+- xarray (zarr/netCDF) dataset loading; also `Dataset.from_arrays` for plain numpy/JAX arrays
 
 See [`docs/project_status.md`](docs/project_status.md) for current capabilities and known limitations.
 
@@ -81,6 +81,12 @@ traj = solve(my_term, dataset, y0, ts, key=key)
 # Ensemble of 100 independent realisations
 ensemble = solve(my_term, dataset, y0, ts, key=key, n_samples=100)
 # shape (100, 121, 2)
+
+# Pre-sampled noise (reproducible, fully JIT-able)
+n_steps = ts.shape[0] - 1
+noise = jr.normal(key, shape=(n_steps, 2))
+traj = solve(my_term, dataset, y0, ts, noise=noise)
+# shape (121, 2)
 ```
 
 ### Loading forcing fields from xarray
@@ -95,6 +101,19 @@ dataset = Dataset.from_xarray(
     fields={"u": "uo", "v": "vo"},
     coordinates={"time": "time", "lat": "latitude", "lon": "longitude"},
 )
+```
+
+Or directly from numpy/JAX arrays:
+
+```python
+import numpy as np
+
+t   = np.linspace(0.0, 4 * 86400.0, 5)  # seconds
+lat = np.linspace(40.0, 50.0, 100)
+lon = np.linspace(-10.0, 0.0, 100)
+u_data = np.ones((5, 100, 100), dtype=np.float32)
+
+dataset = Dataset.from_arrays({"u": u_data}, t=t, lat=lat, lon=lon)
 ```
 
 ### Neighbourhood extraction
@@ -151,13 +170,15 @@ li_ens  = liu_index(ensemble, reference, ensemble=True)            # (S, T)
 ### Solver
 
 ```
-solve(term, args, y0, ts, solver=Heun(), *, key=None, n_samples=None, adjoint="recursive_checkpoint")
+solve(term, args, y0, ts, solver=Heun(), *, key=None, n_samples=None, noise=None, adjoint="recursive_checkpoint")
 ```
 
 | Term return type | Mode | Output shape |
 |---|---|---|
 | `Float[Array, "2"]` | ODE | `(T, 2)` |
-| `(Float[Array, "2"], Float[Array, "2"])` | SDE (`key` required) | `(T, 2)` if `n_samples=None`, else `(S, T, 2)` |
+| `(Float[Array, "2"], Float[Array, "2"])` | SDE — pass `key` or `noise` | `(T, 2)` single; `(S, T, 2)` ensemble |
+
+**Noise for SDE**: either pass `key` (auto-samples internally) or pre-sampled `noise` of shape `(n_steps, 2)` (single) or `(S, n_steps, 2)` (ensemble). Passing `noise` directly bypasses the PRNG and is fully JIT-compilable across calls.
 
 **Term signature**: `f(t: scalar, y: Float[Array, "2"], args: PyTree) -> ...`
 Returns velocity `[dlat/dt, dlon/dt]` in **degrees per second** (ODE) or `(drift, noise_amplitude)` both in deg/s (SDE).
@@ -171,6 +192,7 @@ Returns velocity `[dlat/dt, dlon/dt]` in **degrees per second** (ODE) or `(drift
 | `Field.interp(t, lat, lon)` | Trilinear interpolation → scalar |
 | `Field.neighborhood(t, lat, lon, t_window, lat_window, lon_window)` | Raw grid patch via `lax.dynamic_slice` |
 | `Dataset.from_xarray(ds, fields, coordinates, dtype)` | Load from xarray Dataset |
+| `Dataset.from_arrays(fields, t, lat, lon, dtype)` | Build from numpy/JAX arrays directly |
 | `Dataset.neighborhood(...)` | Neighbourhood for all fields → `dict[str, Array]` |
 
 ### Metrics
