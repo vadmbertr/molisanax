@@ -19,6 +19,8 @@
 
 **Tests**: 89 tests, all passing (`pytest -q`).
 
+**Documentation site**: hosted on GitHub Pages at <https://vadmbertr.github.io/molisanax/> (MkDocs + Material + `mkdocstrings`). Includes a runnable getting-started notebook at `docs/getting_started.ipynb`. Built and deployed by `.github/workflows/docs.yml` on every push to `main`.
+
 **Differentiability**: `jax.grad` and `jax.jvp` through `solve()` in ODE mode verified in tests. `jax.vmap` over SDE ensemble verified.
 
 ### API highlights
@@ -43,7 +45,6 @@
 - Higher-order interpolation (cubic, splines)
 - Non-rectilinear or curvilinear grids (e.g. Arakawa C/D)
 - Longitude wrap-around (periodic boundary) in interpolation
-- CLI or notebook examples
 - Benchmark suite (convergence order, performance)
 
 ### Known limitations
