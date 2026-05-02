@@ -14,6 +14,24 @@ dependencies = [
 [project.optional-dependencies]
 forcing = ["xarray>=2024.1.0", "zarr>=2.17.0", "netcdf4>=1.6.0", "numpy>=1.26.0"]
 dev = ["pytest>=8.0.0", "ruff>=0.4.0", "pyright>=1.1.360", "xarray>=2024.1.0", "zarr>=2.17.0", "numpy>=1.26.0"]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocs-include-markdown-plugin>=6.2",
+    "mkdocs-jupyter>=0.25",
+    "mkdocstrings[python]>=0.26",
+    "griffe>=1.5",
+    "pymdown-extensions>=10.7",
+    "numpy>=1.26.0",
+    "xarray>=2024.1.0",
+    "zarr>=2.17.0",
+    "netcdf4>=1.6.0",
+    "ipykernel>=6.29",
+    "nbconvert>=7.16",
+    "matplotlib>=3.8",
+    "optimistix>=0.0.9",
+    "cmocean>=4.0",
+]
 
 [build-system]
 requires = ["hatchling"]
