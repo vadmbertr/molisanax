@@ -2,7 +2,7 @@
 
 *Last updated: 2026-05-02*
 
-## Version: 0.1.0 — Third iteration (performance + Dataset.from_arrays)
+## Version: 0.1.0 — Fourth iteration (SDE API redesign)
 
 ### What is implemented
 
@@ -14,24 +14,24 @@
 | `geo.py` | Done | `EARTH_RADIUS=6_371_008.8 m`, `haversine`, `meters_to_degrees`, `degrees_to_meters` |
 | `interpolation.py` | Done | 1D linear, 2D bilinear, trilinear (time+space); O(1) index via closed-form floor — no searchsorted |
 | `forcing.py` | Done | `Field` (with `.interp` and `.neighborhood`), `Dataset.from_xarray`, `Dataset.from_arrays`; (time, lat, lon) axis order |
-| `solver.py` | Done | `Euler`, `Heun`; unified `solve()` with auto ODE/SDE detection via `jax.eval_shape`; `noise=` parameter for pre-sampled noise |
+| `solver.py` | Done | `Euler`, `Heun`; unified `solve()` — ODE/SDE detected by caller (`key`/`noise`/`n_noise`); SDE term receives `z` directly |
 | `metrics.py` | Done | `separation_distance`, `normalized_separation_distance`, `liu_index`; all support `ensemble=True` |
 
-**Tests**: 87 tests, all passing (`pytest -q`).
+**Tests**: 89 tests, all passing (`pytest -q`).
 
 **Differentiability**: `jax.grad` and `jax.jvp` through `solve()` in ODE mode verified in tests. `jax.vmap` over SDE ensemble verified.
 
 ### API highlights
 
-**Unified solver**: a single `solve(term, args, y0, ts, solver, *, key, n_samples, noise)` function detects ODE vs SDE from the term's return type at call time (via `jax.eval_shape`):
-- ODE: `term(t, y, args) -> Float[Array, "2"]` → no key/noise required, returns `(T, 2)`
-- SDE: `term(t, y, args) -> tuple[Float[Array, "2"], Float[Array, "2"]]` → pass `key` or `noise`; returns `(T, 2)` for a single realisation or `(S, T, 2)` for an ensemble
+**Unified solver**: a single `solve(term, args, y0, ts, solver, *, key, n_samples, n_noise, noise)` function; mode is selected by the caller, not inferred from term output:
+- ODE: no `key`/`noise`/`n_noise` provided. `term(t, y, args) -> Float[Array, "2"]`.
+- SDE: at least one of `key`, `noise`, or `n_noise` provided. `term(t, y, args, z) -> Float[Array, "2"]` — the term receives `z` directly and returns the full velocity. `dy = term(..., z) * dt`.
 
 **SDE noise**: two modes:
-1. Auto-sampled: pass `key` (and optional `n_samples`) — draws `(n_samples, n_steps, 2)` before `vmap`/`scan`.
-2. Pre-sampled: pass `noise` array of shape `(n_steps, 2)` or `(S, n_steps, 2)` — no PRNG needed, fully JIT-compilable.
+1. Auto-sampled: pass `key` + `n_noise` (and optional `n_samples`) — draws `(n_samples, n_steps, n_noise)` before `vmap`/`scan`.
+2. Pre-sampled: pass `noise` of shape `(n_steps, n_noise)` or `(S, n_steps, n_noise)` — `n_noise` inferred from `noise.shape[-1]`.
 
-**SDE formulation**: `dy = (f + g * z) * dt`. `g` has units of deg/s; all noise is materialised before the `lax.scan` loop.
+**`n_noise`**: the dimension of `z`. Decoupled from the state dimension (2); supports arbitrary generative models (MDNs, flow networks, etc.).
 
 **Neighbourhood extraction**: `Field.neighborhood(t, lat, lon, t_window, lat_window, lon_window)` returns a window of raw grid values via `lax.dynamic_slice` (jit-compatible, grad-compatible w.r.t. the query point).
 

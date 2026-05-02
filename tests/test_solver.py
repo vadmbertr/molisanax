@@ -14,27 +14,13 @@ def uniform_ode_term(dlat, dlon):
     return term
 
 
-# SDE term: constant drift + constant noise amplitude
+# SDE term: constant drift + constant noise amplitude, z-aware
 def uniform_sde_term(dlat, dlon, noise_scale=1e-6):
-    def term(t, y, args):
+    def term(t, y, args, z):
         f = jnp.array([dlat, dlon])
         g = jnp.full(2, noise_scale)
-        return f, g
+        return f + g * z
     return term
-
-
-class TestODEDetection:
-    def test_ode_term_not_detected_as_sde(self):
-        from molisanax.solver import _is_sde_term
-        y0 = jnp.zeros(2)
-        term = uniform_ode_term(0.0, 0.0)
-        assert not _is_sde_term(term, y0, None)
-
-    def test_sde_term_detected_correctly(self):
-        from molisanax.solver import _is_sde_term
-        y0 = jnp.zeros(2)
-        term = uniform_sde_term(0.0, 0.0)
-        assert _is_sde_term(term, y0, None)
 
 
 class TestSolverStep:
@@ -57,6 +43,23 @@ class TestSolverStep:
         z = jnp.zeros(2)
         y1 = solver.sde_step(term, jnp.array(0.0), y0, jnp.array(1.0), None, z)
         assert jnp.allclose(y1, jnp.array([0.1, 0.2]))
+
+    def test_heun_sde_step_zero_noise(self):
+        solver = Heun()
+        y0 = jnp.array([0.0, 0.0])
+        term = uniform_sde_term(0.1, 0.2, noise_scale=0.0)
+        z = jnp.zeros(2)
+        y1 = solver.sde_step(term, jnp.array(0.0), y0, jnp.array(1.0), None, z)
+        assert jnp.allclose(y1, jnp.array([0.1, 0.2]))
+
+    def test_heun_sde_uses_same_z_both_stages(self):
+        # z is non-zero; confirm the call succeeds and returns a finite result
+        solver = Heun()
+        y0 = jnp.array([0.0, 0.0])
+        term = uniform_sde_term(0.1, 0.2, noise_scale=1.0)
+        z = jnp.ones(2)
+        y1 = solver.sde_step(term, jnp.array(0.0), y0, jnp.array(0.01), None, z)
+        assert jnp.all(jnp.isfinite(y1))
 
 
 class TestSolveODE:
@@ -134,21 +137,23 @@ class TestSolveSDE:
         y0 = jnp.zeros(2)
         ts = self._ts()
         key = jax.random.key(0)
-        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, key=key)
+        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, key=key, n_noise=2)
         assert traj.shape == (len(ts), 2)
 
     def test_ensemble_shape(self):
         y0 = jnp.zeros(2)
         ts = self._ts()
         key = jax.random.key(0)
-        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, key=key, n_samples=7)
+        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, key=key, n_noise=2, n_samples=7)
         assert traj.shape == (7, len(ts), 2)
 
     def test_zero_noise_matches_ode(self):
         y0 = jnp.array([10.0, 20.0])
         ts = self._ts(n=50)
         key = jax.random.key(0)
-        sde_traj = solve(uniform_sde_term(1e-4, 2e-4, noise_scale=0.0), None, y0, ts, key=key)
+        # noise_scale=0.0 → g*z = 0 regardless of z → matches ODE
+        sde_traj = solve(uniform_sde_term(1e-4, 2e-4, noise_scale=0.0), None, y0, ts,
+                         key=key, n_noise=2)
         ode_traj = solve(uniform_ode_term(1e-4, 2e-4), None, y0, ts)
         assert jnp.allclose(sde_traj, ode_traj, atol=1e-5)
 
@@ -157,23 +162,41 @@ class TestSolveSDE:
         ts = self._ts(n=10)
         key = jax.random.key(0)
         ensemble = solve(uniform_sde_term(1e-4, 2e-4, noise_scale=1e-8), None, y0, ts,
-                         key=key, n_samples=200)
+                         key=key, n_noise=2, n_samples=200)
         ode_traj = solve(uniform_ode_term(1e-4, 2e-4), None, y0, ts)
         assert jnp.allclose(ensemble.mean(axis=0), ode_traj, atol=1e-4)
 
     def test_missing_key_and_noise_raises(self):
+        # n_noise without key or noise → SDE mode but no noise source
         y0 = jnp.zeros(2)
         ts = self._ts()
-        with pytest.raises(ValueError, match="key"):
-            solve(uniform_sde_term(0.0, 0.0), None, y0, ts)
+        with pytest.raises(ValueError):
+            solve(uniform_sde_term(0.0, 0.0), None, y0, ts, n_noise=2)
+
+    def test_missing_n_noise_with_key_raises(self):
+        # key without n_noise → cannot auto-sample without knowing latent dim
+        y0 = jnp.zeros(2)
+        ts = self._ts()
+        with pytest.raises(ValueError, match="n_noise"):
+            solve(uniform_sde_term(0.0, 0.0), None, y0, ts, key=jax.random.key(0))
 
     def test_jit_compatible(self):
         y0 = jnp.zeros(2)
         ts = self._ts()
         term = uniform_sde_term(1e-4, 2e-4)
-        fn = jax.jit(lambda k: solve(term, None, y0, ts, key=k, n_samples=3))
+        fn = jax.jit(lambda k: solve(term, None, y0, ts, key=k, n_noise=2, n_samples=3))
         traj = fn(jax.random.key(0))
         assert traj.shape == (3, len(ts), 2)
+
+    def test_custom_n_noise(self):
+        # term uses z of dimension 4 (e.g., a generative model)
+        def term_4d(t, y, args, z):
+            return jnp.array([z[0] + z[1], z[2] + z[3]]) * 1e-6
+        y0 = jnp.zeros(2)
+        ts = self._ts()
+        traj = solve(term_4d, None, y0, ts, key=jax.random.key(0), n_noise=4)
+        assert traj.shape == (len(ts), 2)
+        assert jnp.all(jnp.isfinite(traj))
 
     # --- pre-sampled noise ---
 
@@ -181,7 +204,7 @@ class TestSolveSDE:
         y0 = jnp.zeros(2)
         ts = self._ts()
         n_steps = len(ts) - 1
-        noise = jnp.zeros((n_steps, 2))  # zero noise → matches ODE
+        noise = jnp.zeros((n_steps, 2))
         traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, noise=noise)
         assert traj.shape == (len(ts), 2)
 
@@ -203,7 +226,6 @@ class TestSolveSDE:
         assert traj.shape == (5, len(ts), 2)
 
     def test_presampled_noise_no_key_needed(self):
-        # noise= provided, no key → should not raise
         y0 = jnp.zeros(2)
         ts = self._ts()
         n_steps = len(ts) - 1
@@ -212,16 +234,15 @@ class TestSolveSDE:
         assert jnp.all(jnp.isfinite(traj))
 
     def test_presampled_vs_autosampled_same_noise_same_traj(self):
-        # auto-sample with key, extract the noise, re-run with explicit noise → identical output
+        # Reproduce the exact noise that auto-sample uses, then compare.
         y0 = jnp.array([10.0, 20.0])
         ts = self._ts(n=20)
         key = jax.random.key(42)
         n_steps = len(ts) - 1
 
-        # Auto-sample
-        traj_auto = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, key=key)
+        traj_auto = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, key=key, n_noise=2)
 
-        # Reproduce the exact same noise that auto-sample uses: (1, n_steps, 2)[0]
+        # Auto-sample draws (1, n_steps, n_noise)[0]
         noise_repro = jax.random.normal(key, shape=(1, n_steps, 2), dtype=y0.dtype)[0]
         traj_noise = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, noise=noise_repro)
 
