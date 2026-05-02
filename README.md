@@ -4,6 +4,8 @@
 
 `molisanax` integrates particle trajectories on the ocean surface by solving ODEs and SDEs over user-supplied forcing fields (e.g. surface currents). Every computation is fully differentiable via JAX automatic differentiation — both forward-mode (`jax.jvp`) and reverse-mode (`jax.grad`) are supported.
 
+📖 **Documentation:** <https://vadmbertr.github.io/molisanax/> — full API reference and a runnable [getting-started notebook](https://vadmbertr.github.io/molisanax/getting_started/).
+
 ## Project Status
 
 **v0.1.0 — fourth iteration.** Core functionality implemented and tested (89 tests):
@@ -168,46 +170,7 @@ li_ens  = liu_index(ensemble, reference, ensemble=True)            # (S, T)
 
 ## API Reference
 
-### Solver
-
-```
-solve(term, args, y0, ts, solver=Heun(), *, key=None, n_samples=None, n_noise=None, noise=None, adjoint="recursive_checkpoint")
-```
-
-| Caller provides | Mode | Term signature | Output shape |
-|---|---|---|---|
-| nothing extra | ODE | `f(t, y, args)` | `(T, 2)` |
-| `key` + `n_noise` | SDE, single | `f(t, y, args, z)` | `(T, 2)` |
-| `key` + `n_noise` + `n_samples` | SDE, ensemble | `f(t, y, args, z)` | `(S, T, 2)` |
-| `noise` of shape `(n_steps, n_noise)` | SDE, single | `f(t, y, args, z)` | `(T, 2)` |
-| `noise` of shape `(S, n_steps, n_noise)` | SDE, ensemble | `f(t, y, args, z)` | `(S, T, 2)` |
-
-**`n_noise`**: the dimension of `z` passed to the SDE term. It does not have to equal 2 — any generative network can accept an arbitrary latent dimension. When `noise` is pre-sampled, `n_noise` is inferred from `noise.shape[-1]`.
-
-**Term signature**: `f(t: scalar, y: Float[Array, "2"], args: PyTree) -> ...`
-Returns velocity `[dlat/dt, dlon/dt]` in **degrees per second** (ODE) or `(drift, noise_amplitude)` both in deg/s (SDE).
-
-**Solvers**: `Euler()`, `Heun()` (default)
-
-### Forcing
-
-| | |
-|---|---|
-| `Field.interp(t, lat, lon)` | Trilinear interpolation → scalar |
-| `Field.neighborhood(t, lat, lon, t_window, lat_window, lon_window)` | Raw grid patch via `lax.dynamic_slice` |
-| `Dataset.from_xarray(ds, fields, coordinates, dtype)` | Load from xarray Dataset |
-| `Dataset.from_arrays(fields, t, lat, lon, dtype)` | Build from numpy/JAX arrays directly |
-| `Dataset.neighborhood(...)` | Neighbourhood for all fields → `dict[str, Array]` |
-
-### Metrics
-
-All accept `ensemble=False` (single trajectory) or `ensemble=True` (auto-vmaps over first axis).
-
-| | |
-|---|---|
-| `separation_distance(y, y_ref)` | Haversine at each step, metres |
-| `normalized_separation_distance(y, y_ref)` | `sep(t) / cumsum_ref_arc(t)` |
-| `liu_index(y, y_ref)` | `cumsum_sep(t) / cumsum_ref_arc(t)` |
+The full API reference — every public symbol, signature, and docstring — lives on the documentation site: <https://vadmbertr.github.io/molisanax/api/>.
 
 ## Design
 

@@ -1,0 +1,79 @@
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - toc.integrate
+    - header.autohide
+  palette:
+    - scheme: default
+      primary: white
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: black
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+site_name: molisanax
+site_description: Documentation for the molisanax package — a differentiable Lagrangian simulator for ocean surface trajectories (JAX/Equinox).
+site_author: Vadim Bertrand
+site_url: https://vadmbertr.github.io/molisanax/
+
+repo_url: https://github.com/vadmbertr/molisanax
+repo_name: vadmbertr/molisanax
+
+strict: true
+
+not_in_nav: |
+  /implementation_plan.md
+  /project_plan.md
+  /project_status.md
+
+
+extra_javascript:
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+markdown_extensions:
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.superfences
+  - pymdownx.details
+  - admonition
+  - codehilite
+  - toc:
+      permalink: true
+      toc_depth: 4
+
+plugins:
+  - search
+  - autorefs
+  - include-markdown
+  - mkdocs-jupyter:
+      execute: false
+      include_source: true
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            heading_level: 3
+            inherited_members: false
+            members_order: source
+            show_bases: true
+            show_if_no_docstring: false
+            show_root_full_path: true
+            show_root_heading: true
+            show_signature_annotations: true
+            allow_inspection: true
+
+nav:
+  - Home: "index.md"
+  - Getting started: "getting_started.ipynb"
+  - API: "api.md"
