@@ -6,10 +6,10 @@
 
 ## Project Status
 
-**v0.1.0 — third iteration.** Core functionality implemented and tested (87 tests):
+**v0.1.0 — fourth iteration.** Core functionality implemented and tested (89 tests):
 - Bilinear interpolation of rectilinear A-grid forcing fields, with neighbourhood extraction
-- Unified `solve()` function — automatically detects ODE vs SDE from the term's return type
-- Euler and Heun solvers with constant step size; pre-sampled or auto-sampled noise for SDE
+- Unified `solve()` function — ODE/SDE mode selected by caller (no introspection)
+- Euler and Heun solvers; SDE term receives noise vector `z` directly for full flexibility
 - Geographic unit conversions (metres ↔ degrees)
 - Along-trajectory metrics with optional ensemble (vmap) mode
 - xarray (zarr/netCDF) dataset loading; also `Dataset.from_arrays` for plain numpy/JAX arrays
@@ -57,32 +57,33 @@ trajectory = solve(my_term, dataset, y0, ts, Heun())
 
 ### SDE simulation (stochastic ensemble)
 
-A term returning `(drift, noise_amplitude)` triggers SDE mode. The solver draws
-`z ~ N(0, I₂)` at each step and computes `dy = (drift + noise_amplitude * z) * dt`.
+SDE mode is activated by passing `key`, `noise`, or `n_noise` to `solve()`.
+The term receives the pre-sampled noise vector `z` as a fourth argument and
+returns the full velocity — no `(f, g)` decomposition is imposed.
 
 ```python
 import jax.random as jr
 
-def my_term(t, y, args):
+def my_term(t, y, args, z):
     dataset = args
     lat, lon = y[0], y[1]
     u = dataset["u"].interp(t, lat, lon)
     v = dataset["v"].interp(t, lat, lon)
     drift = meters_to_degrees(jnp.array([v, u]), lat)
     noise_amplitude = jnp.full(2, 1e-5)   # deg/s noise scale per component
-    return drift, noise_amplitude
+    return drift + noise_amplitude * z
 
 key = jr.key(0)
 
-# Single stochastic trajectory
-traj = solve(my_term, dataset, y0, ts, key=key)
+# Single stochastic trajectory (z has dimension 2)
+traj = solve(my_term, dataset, y0, ts, key=key, n_noise=2)
 # shape (121, 2)
 
 # Ensemble of 100 independent realisations
-ensemble = solve(my_term, dataset, y0, ts, key=key, n_samples=100)
+ensemble = solve(my_term, dataset, y0, ts, key=key, n_noise=2, n_samples=100)
 # shape (100, 121, 2)
 
-# Pre-sampled noise (reproducible, fully JIT-able)
+# Pre-sampled noise (reproducible; n_noise inferred from noise.shape[-1])
 n_steps = ts.shape[0] - 1
 noise = jr.normal(key, shape=(n_steps, 2))
 traj = solve(my_term, dataset, y0, ts, noise=noise)
@@ -170,15 +171,18 @@ li_ens  = liu_index(ensemble, reference, ensemble=True)            # (S, T)
 ### Solver
 
 ```
-solve(term, args, y0, ts, solver=Heun(), *, key=None, n_samples=None, noise=None, adjoint="recursive_checkpoint")
+solve(term, args, y0, ts, solver=Heun(), *, key=None, n_samples=None, n_noise=None, noise=None, adjoint="recursive_checkpoint")
 ```
 
-| Term return type | Mode | Output shape |
-|---|---|---|
-| `Float[Array, "2"]` | ODE | `(T, 2)` |
-| `(Float[Array, "2"], Float[Array, "2"])` | SDE — pass `key` or `noise` | `(T, 2)` single; `(S, T, 2)` ensemble |
+| Caller provides | Mode | Term signature | Output shape |
+|---|---|---|---|
+| nothing extra | ODE | `f(t, y, args)` | `(T, 2)` |
+| `key` + `n_noise` | SDE, single | `f(t, y, args, z)` | `(T, 2)` |
+| `key` + `n_noise` + `n_samples` | SDE, ensemble | `f(t, y, args, z)` | `(S, T, 2)` |
+| `noise` of shape `(n_steps, n_noise)` | SDE, single | `f(t, y, args, z)` | `(T, 2)` |
+| `noise` of shape `(S, n_steps, n_noise)` | SDE, ensemble | `f(t, y, args, z)` | `(S, T, 2)` |
 
-**Noise for SDE**: either pass `key` (auto-samples internally) or pre-sampled `noise` of shape `(n_steps, 2)` (single) or `(S, n_steps, 2)` (ensemble). Passing `noise` directly bypasses the PRNG and is fully JIT-compilable across calls.
+**`n_noise`**: the dimension of `z` passed to the SDE term. It does not have to equal 2 — any generative network can accept an arbitrary latent dimension. When `noise` is pre-sampled, `n_noise` is inferred from `noise.shape[-1]`.
 
 **Term signature**: `f(t: scalar, y: Float[Array, "2"], args: PyTree) -> ...`
 Returns velocity `[dlat/dt, dlon/dt]` in **degrees per second** (ODE) or `(drift, noise_amplitude)` both in deg/s (SDE).
