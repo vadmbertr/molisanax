@@ -1,8 +1,8 @@
 # Project Status
 
-*Last updated: 2026-05-01*
+*Last updated: 2026-05-02*
 
-## Version: 0.1.0 — Second iteration (API refinement)
+## Version: 0.1.0 — Fourth iteration (SDE API redesign)
 
 ### What is implemented
 
@@ -12,22 +12,26 @@
 |---|---|---|
 | `_safe_math.py` | Done | `safe_sqrt`, `safe_log`, `safe_divide` — gradient-safe math utilities |
 | `geo.py` | Done | `EARTH_RADIUS=6_371_008.8 m`, `haversine`, `meters_to_degrees`, `degrees_to_meters` |
-| `interpolation.py` | Done | 1D linear, 2D bilinear, trilinear (time+space); native JAX, no interpax |
-| `forcing.py` | Done | `Field` (with `.interp` and `.neighborhood`), `Dataset.from_xarray`; (time, lat, lon) axis order |
-| `solver.py` | Done | `Euler`, `Heun`; unified `solve()` with auto ODE/SDE detection via `jax.eval_shape` |
+| `interpolation.py` | Done | 1D linear, 2D bilinear, trilinear (time+space); O(1) index via closed-form floor — no searchsorted |
+| `forcing.py` | Done | `Field` (with `.interp` and `.neighborhood`), `Dataset.from_xarray`, `Dataset.from_arrays`; (time, lat, lon) axis order |
+| `solver.py` | Done | `Euler`, `Heun`; unified `solve()` — ODE/SDE detected by caller (`key`/`noise`/`n_noise`); SDE term receives `z` directly |
 | `metrics.py` | Done | `separation_distance`, `normalized_separation_distance`, `liu_index`; all support `ensemble=True` |
 
-**Tests**: 73 tests, all passing (`pytest -q`).
+**Tests**: 89 tests, all passing (`pytest -q`).
 
 **Differentiability**: `jax.grad` and `jax.jvp` through `solve()` in ODE mode verified in tests. `jax.vmap` over SDE ensemble verified.
 
 ### API highlights
 
-**Unified solver**: a single `solve(term, args, y0, ts, solver, *, key, n_samples)` function detects ODE vs SDE from the term's return type at call time (via `jax.eval_shape`):
-- ODE: `term(t, y, args) -> Float[Array, "2"]` → no key required, returns `(T, 2)`
-- SDE: `term(t, y, args) -> tuple[Float[Array, "2"], Float[Array, "2"]]` → requires `key`; returns `(T, 2)` for a single realisation or `(S, T, 2)` for an ensemble
+**Unified solver**: a single `solve(term, args, y0, ts, solver, *, key, n_samples, n_noise, noise)` function; mode is selected by the caller, not inferred from term output:
+- ODE: no `key`/`noise`/`n_noise` provided. `term(t, y, args) -> Float[Array, "2"]`.
+- SDE: at least one of `key`, `noise`, or `n_noise` provided. `term(t, y, args, z) -> Float[Array, "2"]` — the term receives `z` directly and returns the full velocity. `dy = term(..., z) * dt`.
 
-**SDE formulation**: `dy = (f + g * z) * dt` where `z ~ N(0, I₂)` is drawn fresh each step by the solver. `g` has units of deg/s — it is a noise-amplitude velocity, not a diffusion matrix. Noise is pre-sampled before the `lax.scan` loop.
+**SDE noise**: two modes:
+1. Auto-sampled: pass `key` + `n_noise` (and optional `n_samples`) — draws `(n_samples, n_steps, n_noise)` before `vmap`/`scan`.
+2. Pre-sampled: pass `noise` of shape `(n_steps, n_noise)` or `(S, n_steps, n_noise)` — `n_noise` inferred from `noise.shape[-1]`.
+
+**`n_noise`**: the dimension of `z`. Decoupled from the state dimension (2); supports arbitrary generative models (MDNs, flow networks, etc.).
 
 **Neighbourhood extraction**: `Field.neighborhood(t, lat, lon, t_window, lat_window, lon_window)` returns a window of raw grid values via `lax.dynamic_slice` (jit-compatible, grad-compatible w.r.t. the query point).
 
