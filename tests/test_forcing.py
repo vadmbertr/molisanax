@@ -1,5 +1,6 @@
 """Tests for forcing.py: Field and Dataset."""
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -65,6 +66,93 @@ class TestField:
             jnp.array(0.0), jnp.array(0.0), jnp.array(10.0)
         )
         assert patch.shape == (3, 3, 3)
+
+
+class TestFieldLonPeriodic:
+    """Longitude wrap-around in Field.interp and Field.neighborhood."""
+
+    def _periodic_field(self):
+        # Global longitude grid: 4 cells of 90° spanning [0, 360)
+        lats = jnp.array([0.0, 1.0])
+        lons = jnp.array([0.0, 90.0, 180.0, 270.0])
+        t_coords = jnp.array([0.0, 1.0])
+        # values[t, lat, lon] encode the lon index directly
+        slab = jnp.broadcast_to(jnp.array([0.0, 1.0, 2.0, 3.0]), (2, 4))
+        values = jnp.stack([slab, slab])  # (n_t=2, n_lat=2, n_lon=4)
+        return Field(
+            values=values,
+            t_coords=t_coords,
+            lat_coords=lats,
+            lon_coords=lons,
+            lon_period=360.0,
+        )
+
+    def test_interp_wraps(self):
+        field = self._periodic_field()
+        v = field.interp(jnp.array(0.5), jnp.array(0.0), jnp.array(315.0))
+        # midpoint between lon-index 3 and lon-index 0
+        assert float(v) == pytest.approx(1.5)
+
+    def test_neighborhood_wraps_at_zero(self):
+        field = self._periodic_field()
+        # Centre on lon=0° (index 0), window=1 → indices [3, 0, 1]
+        patch = field.neighborhood(
+            jnp.array(0.0), jnp.array(0.0), jnp.array(0.0),
+            t_window=0, lat_window=0, lon_window=1,
+        )
+        assert patch.shape == (1, 1, 3)
+        assert jnp.allclose(patch[0, 0], jnp.array([3.0, 0.0, 1.0]))
+
+    def test_neighborhood_wraps_at_high_end(self):
+        field = self._periodic_field()
+        # Centre on lon=270° (index 3), window=1 → indices [2, 3, 0]
+        patch = field.neighborhood(
+            jnp.array(0.0), jnp.array(0.0), jnp.array(270.0),
+            t_window=0, lat_window=0, lon_window=1,
+        )
+        assert jnp.allclose(patch[0, 0], jnp.array([2.0, 3.0, 0.0]))
+
+    def test_neighborhood_negative_lon_wraps(self):
+        field = self._periodic_field()
+        # -90° == 270° (index 3); window=1 → indices [2, 3, 0]
+        patch = field.neighborhood(
+            jnp.array(0.0), jnp.array(0.0), jnp.array(-90.0),
+            t_window=0, lat_window=0, lon_window=1,
+        )
+        assert jnp.allclose(patch[0, 0], jnp.array([2.0, 3.0, 0.0]))
+
+    def test_non_periodic_neighborhood_clamps_at_zero(self):
+        # Without lon_period the existing clamp behaviour is preserved
+        lats = jnp.array([0.0, 1.0])
+        lons = jnp.array([0.0, 90.0, 180.0, 270.0])
+        t_coords = jnp.array([0.0, 1.0])
+        slab = jnp.broadcast_to(jnp.array([0.0, 1.0, 2.0, 3.0]), (2, 4))
+        values = jnp.stack([slab, slab])
+        field = Field(
+            values=values,
+            t_coords=t_coords,
+            lat_coords=lats,
+            lon_coords=lons,
+        )
+        patch = field.neighborhood(
+            jnp.array(0.0), jnp.array(0.0), jnp.array(0.0),
+            t_window=0, lat_window=0, lon_window=1,
+        )
+        # clamp to start: indices [0, 1, 2]
+        assert jnp.allclose(patch[0, 0], jnp.array([0.0, 1.0, 2.0]))
+
+    def test_neighborhood_jit_compatible(self):
+        field = self._periodic_field()
+
+        @jax.jit
+        def f(lon):
+            return field.neighborhood(
+                jnp.array(0.0), jnp.array(0.0), lon,
+                t_window=0, lat_window=0, lon_window=1,
+            )
+
+        patch = f(jnp.array(0.0))
+        assert jnp.allclose(patch[0, 0], jnp.array([3.0, 0.0, 1.0]))
 
 
 class TestDataset:
@@ -144,6 +232,19 @@ class TestDatasetFromArrays:
         u   = jnp.zeros((4, 4, 4))
         dataset = Dataset.from_arrays({"u": u}, t=t, lat=lat, lon=lon)
         assert dataset["u"].values.shape == (4, 4, 4)
+
+    def test_lon_period_propagates_to_fields(self):
+        t = np.linspace(0.0, 3600.0, 2)
+        lat = np.array([0.0, 1.0])
+        lon = np.array([0.0, 90.0, 180.0, 270.0])
+        u = np.broadcast_to(np.array([0.0, 1.0, 2.0, 3.0], dtype=np.float32),
+                            (2, 2, 4))
+        dataset = Dataset.from_arrays(
+            {"u": u}, t=t, lat=lat, lon=lon, lon_period=360.0,
+        )
+        assert dataset["u"].lon_period == 360.0
+        v = dataset["u"].interp(jnp.array(0.0), jnp.array(0.0), jnp.array(315.0))
+        assert float(v) == pytest.approx(1.5)
 
     def test_from_arrays_and_from_xarray_agree(self):
         """from_arrays and from_xarray must produce identical field values."""

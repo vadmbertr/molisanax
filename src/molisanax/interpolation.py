@@ -31,6 +31,26 @@ def _index_and_weight(
     return i, w
 
 
+def _periodic_index_and_weight(
+    coords: Float[Array, "n"], x: Float[Array, ""], period: float
+) -> tuple[Int[Array, ""], Float[Array, ""]]:
+    """Floor index and linear weight on a periodic equally-spaced 1-D grid.
+
+    The grid is assumed to span exactly one period: ``n * dx == period`` and
+    ``coords[n] == coords[0] + period``, with ``coords[n]`` not stored. The
+    returned index ``i`` is in ``[0, n-1]``; the right neighbour is
+    ``(i + 1) % n``.
+    """
+    x0 = coords[0]
+    dx = coords[1] - coords[0]
+    n = coords.shape[0]
+    u = ((x - x0) % period) / dx  # u in [0, n)
+    floor_u = jnp.floor(u)
+    i = floor_u.astype(jnp.int32) % n
+    w = u - floor_u
+    return i, w
+
+
 def linear_interp_1d(
     values: Float[Array, "n"],
     coords: Float[Array, "n"],
@@ -57,6 +77,7 @@ def bilinear_interp_2d(
     lon_coords: Float[Array, "lon"],
     lat: Float[Array, ""],
     lon: Float[Array, ""],
+    lon_period: float | None = None,
 ) -> Float[Array, ""]:
     """Bilinearly interpolate a 2-D field on an equally-spaced rectilinear grid.
 
@@ -66,17 +87,29 @@ def bilinear_interp_2d(
         lon_coords: Equally-spaced longitude coordinates in degrees, shape ``(n_lon,)``.
         lat: Query latitude in degrees.
         lon: Query longitude in degrees.
+        lon_period: If given (e.g. ``360.0``), the longitude axis is treated
+            as periodic with that period; the grid is assumed to span exactly
+            one period (``n_lon * dlon == lon_period``) and the cell at
+            ``lon_coords[-1] + dlon`` is identified with ``lon_coords[0]``.
+            ``None`` (default) reproduces the non-wrapping behaviour with
+            linear extrapolation past the boundary.
 
     Returns:
         Interpolated scalar value at ``(lat, lon)``.
     """
     il, wl = _index_and_weight(lat_coords, lat)
-    jl, wj = _index_and_weight(lon_coords, lon)
+    if lon_period is None:
+        jl, wj = _index_and_weight(lon_coords, lon)
+        jl1 = jl + 1
+    else:
+        nlon = lon_coords.shape[0]
+        jl, wj = _periodic_index_and_weight(lon_coords, lon, lon_period)
+        jl1 = (jl + 1) % nlon
     return (
-        values[il,     jl    ] * (1.0 - wl) * (1.0 - wj)
-        + values[il + 1, jl    ] * wl         * (1.0 - wj)
-        + values[il,     jl + 1] * (1.0 - wl) * wj
-        + values[il + 1, jl + 1] * wl         * wj
+        values[il,     jl ] * (1.0 - wl) * (1.0 - wj)
+        + values[il + 1, jl ] * wl         * (1.0 - wj)
+        + values[il,     jl1] * (1.0 - wl) * wj
+        + values[il + 1, jl1] * wl         * wj
     )
 
 
@@ -88,6 +121,7 @@ def spatiotemporal_interp(
     t: Float[Array, ""],
     lat: Float[Array, ""],
     lon: Float[Array, ""],
+    lon_period: float | None = None,
 ) -> Float[Array, ""]:
     """Trilinearly interpolate a field in time and space on an A-grid.
 
@@ -102,11 +136,17 @@ def spatiotemporal_interp(
         t: Query time in seconds.
         lat: Query latitude in degrees.
         lon: Query longitude in degrees.
+        lon_period: If given, treat the longitude axis as periodic with this
+            period (see :func:`bilinear_interp_2d`).
 
     Returns:
         Interpolated scalar value at ``(t, lat, lon)``.
     """
     it, wt = _index_and_weight(t_coords, t)
-    v0 = bilinear_interp_2d(values[it],     lat_coords, lon_coords, lat, lon)
-    v1 = bilinear_interp_2d(values[it + 1], lat_coords, lon_coords, lat, lon)
+    v0 = bilinear_interp_2d(
+        values[it],     lat_coords, lon_coords, lat, lon, lon_period=lon_period,
+    )
+    v1 = bilinear_interp_2d(
+        values[it + 1], lat_coords, lon_coords, lat, lon, lon_period=lon_period,
+    )
     return v0 * (1.0 - wt) + v1 * wt
