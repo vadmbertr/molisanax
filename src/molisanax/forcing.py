@@ -27,7 +27,14 @@ def _nearest_idx(coords: Float[Array, "n"], x: Float[Array, ""], n: int) -> Arra
 
 
 class Field(eqx.Module):
-    """A single scalar forcing field on a (time, lat, lon) rectilinear A-grid."""
+    """A single scalar forcing field on a (time, lat, lon) rectilinear A-grid.
+
+    Attributes:
+        values: Field values, shape ``(time, lat, lon)``.
+        t_coords: 1-D time coordinates in seconds, equally spaced.
+        lat_coords: 1-D latitude coordinates in degrees, equally spaced.
+        lon_coords: 1-D longitude coordinates in degrees, equally spaced.
+    """
 
     values: Float[Array, "time lat lon"]
     t_coords: Float[Array, "time"]
@@ -40,7 +47,18 @@ class Field(eqx.Module):
         lat: Float[Array, ""],
         lon: Float[Array, ""],
     ) -> Float[Array, ""]:
-        """Interpolate the field at (t, lat, lon) using trilinear interpolation."""
+        """Trilinearly interpolate the field at a single ``(t, lat, lon)`` point.
+
+        Args:
+            t: Query time in seconds.
+            lat: Query latitude in degrees.
+            lon: Query longitude in degrees.
+
+        Returns:
+            Interpolated scalar value at the query point. Outside the grid the
+            interpolation extrapolates linearly (clamping to grid boundaries
+            beyond one cell).
+        """
         return spatiotemporal_interp(
             self.values, self.t_coords, self.lat_coords, self.lon_coords,
             t, lat, lon,
@@ -93,11 +111,24 @@ class Field(eqx.Module):
 
 
 class Dataset(eqx.Module):
-    """Collection of forcing fields sharing the same (time, lat, lon) grid."""
+    """Collection of named :class:`Field` instances sharing a common grid.
+
+    Attributes:
+        fields: Mapping ``{field_name: Field}``. All fields are assumed to be
+            defined on the same ``(time, lat, lon)`` grid.
+    """
 
     fields: dict[str, Field]
 
     def __getitem__(self, name: str) -> Field:
+        """Return the :class:`Field` registered under ``name``.
+
+        Args:
+            name: Field name as registered in ``fields``.
+
+        Returns:
+            The :class:`Field` instance.
+        """
         return self.fields[name]
 
     def neighborhood(
@@ -109,7 +140,24 @@ class Dataset(eqx.Module):
         lat_window: int = 1,
         lon_window: int = 1,
     ) -> dict[str, Float[Array, "wt wlat wlon"]]:
-        """Extract neighbourhoods for all fields. See Field.neighborhood for details."""
+        """Extract a neighbourhood patch from every field at one query point.
+
+        Equivalent to calling :meth:`Field.neighborhood` on every field with
+        the same query and window arguments. Useful for SDE terms that need
+        local spatial gradients (e.g. Smagorinsky-style diffusion).
+
+        Args:
+            t: Query time in seconds.
+            lat: Query latitude in degrees.
+            lon: Query longitude in degrees.
+            t_window: Half-width along the time axis (window size = ``2*t_window+1``).
+            lat_window: Half-width along the latitude axis.
+            lon_window: Half-width along the longitude axis.
+
+        Returns:
+            Mapping ``{field_name: array}`` where each array has shape
+            ``(2*t_window+1, 2*lat_window+1, 2*lon_window+1)``.
+        """
         return {
             name: field.neighborhood(t, lat, lon, t_window, lat_window, lon_window)
             for name, field in self.fields.items()
