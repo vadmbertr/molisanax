@@ -1,28 +1,41 @@
-// Wrap the full input wrapper of every cell tagged "hide-input" in a
-// <details> block so the source is collapsed by default; outputs remain
-// visible.
-//
-// mkdocs-jupyter renders each tagged cell with two nested
-// .celltag_hide-input wrappers (outer + inner). The .jp-Cell-inputWrapper
-// is only a direct child of the inner one, so the selector below matches
-// each input wrapper exactly once — avoiding nested <details>.
+// Wrap the input wrapper of every cell tagged "hide-input" in a plain
+// <div> that can be toggled by a button. We deliberately do NOT use
+// <details>/<summary> because Material for MkDocs applies admonition-like
+// styling (background, border, padding) to those elements.
 (function () {
-  function init() {
-    var wrappers = document.querySelectorAll(
-      ".celltag_hide-input > .jp-Cell-inputWrapper"
-    );
-    wrappers.forEach(function (wrapper) {
-      if (wrapper.dataset.mxFolded === "1") return;
-      wrapper.dataset.mxFolded = "1";
+  function makeToggle(wrapper) {
+    if (wrapper.dataset.mxFolded === "1") return;
+    wrapper.dataset.mxFolded = "1";
 
-      var details = document.createElement("details");
-      details.className = "mx-fold";
-      var summary = document.createElement("summary");
-      details.appendChild(summary);
+    var fold = document.createElement("div");
+    fold.className = "mx-fold mx-fold--closed";
 
-      wrapper.parentNode.insertBefore(details, wrapper);
-      details.appendChild(wrapper);
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "mx-fold-toggle";
+    button.textContent = "▸ Show code";
+    button.setAttribute("aria-expanded", "false");
+
+    var body = document.createElement("div");
+    body.className = "mx-fold-body";
+
+    button.addEventListener("click", function () {
+      var open = fold.classList.toggle("mx-fold--open");
+      fold.classList.toggle("mx-fold--closed", !open);
+      button.textContent = (open ? "▾ Hide code" : "▸ Show code");
+      button.setAttribute("aria-expanded", open ? "true" : "false");
     });
+
+    wrapper.parentNode.insertBefore(fold, wrapper);
+    fold.appendChild(button);
+    fold.appendChild(body);
+    body.appendChild(wrapper);
+  }
+
+  function init() {
+    document
+      .querySelectorAll(".celltag_hide-input > .jp-Cell-inputWrapper")
+      .forEach(makeToggle);
   }
 
   if (document.readyState === "loading") {
