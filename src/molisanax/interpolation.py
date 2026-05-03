@@ -36,7 +36,17 @@ def linear_interp_1d(
     coords: Float[Array, "n"],
     x: Float[Array, ""],
 ) -> Float[Array, ""]:
-    """1D linear interpolation on an equally-spaced grid."""
+    """Linearly interpolate a 1-D field on an equally-spaced grid.
+
+    Args:
+        values: Field values at each grid node, shape ``(n,)``.
+        coords: Equally-spaced 1-D grid coordinates, shape ``(n,)``.
+        x: Query coordinate.
+
+    Returns:
+        Interpolated scalar value at ``x``. For ``x`` outside the grid the
+        result is the linear extrapolation from the nearest cell.
+    """
     i, w = _index_and_weight(coords, x)
     return values[i] * (1.0 - w) + values[i + 1] * w
 
@@ -48,7 +58,18 @@ def bilinear_interp_2d(
     lat: Float[Array, ""],
     lon: Float[Array, ""],
 ) -> Float[Array, ""]:
-    """Bilinear interpolation on a 2-D equally-spaced rectilinear (lat, lon) grid."""
+    """Bilinearly interpolate a 2-D field on an equally-spaced rectilinear grid.
+
+    Args:
+        values: Field values, shape ``(n_lat, n_lon)``.
+        lat_coords: Equally-spaced latitude coordinates in degrees, shape ``(n_lat,)``.
+        lon_coords: Equally-spaced longitude coordinates in degrees, shape ``(n_lon,)``.
+        lat: Query latitude in degrees.
+        lon: Query longitude in degrees.
+
+    Returns:
+        Interpolated scalar value at ``(lat, lon)``.
+    """
     il, wl = _index_and_weight(lat_coords, lat)
     jl, wj = _index_and_weight(lon_coords, lon)
     return (
@@ -68,7 +89,23 @@ def spatiotemporal_interp(
     lat: Float[Array, ""],
     lon: Float[Array, ""],
 ) -> Float[Array, ""]:
-    """Trilinear interpolation: bilinear in (lat, lon) at the two bounding time steps, then linear in t."""
+    """Trilinearly interpolate a field in time and space on an A-grid.
+
+    Performs :func:`bilinear_interp_2d` at the two bounding time slices, then
+    linearly blends the two results in time.
+
+    Args:
+        values: Field values, shape ``(n_time, n_lat, n_lon)``.
+        t_coords: Equally-spaced time coordinates in seconds, shape ``(n_time,)``.
+        lat_coords: Equally-spaced latitude coordinates in degrees.
+        lon_coords: Equally-spaced longitude coordinates in degrees.
+        t: Query time in seconds.
+        lat: Query latitude in degrees.
+        lon: Query longitude in degrees.
+
+    Returns:
+        Interpolated scalar value at ``(t, lat, lon)``.
+    """
     it, wt = _index_and_weight(t_coords, t)
     v0 = bilinear_interp_2d(values[it],     lat_coords, lon_coords, lat, lon)
     v1 = bilinear_interp_2d(values[it + 1], lat_coords, lon_coords, lat, lon)
