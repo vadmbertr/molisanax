@@ -36,7 +36,12 @@ __all__ = [
 
 
 class AbstractSolver(eqx.Module):
-    """Abstract base for fixed-step ODE/SDE solvers."""
+    """Abstract base class for fixed-step ODE/SDE solvers.
+
+    Subclasses implement :meth:`ode_step` (deterministic) and :meth:`sde_step`
+    (stochastic, with pre-sampled noise). Both advance the state ``y`` by a
+    single step of size ``dt``.
+    """
 
     @abc.abstractmethod
     def ode_step(
@@ -47,7 +52,19 @@ class AbstractSolver(eqx.Module):
         dt: Float[Array, ""],
         args: PyTree,
     ) -> Float[Array, "2"]:
-        """Advance ODE state y by one step of size dt."""
+        """Advance the ODE state by one step of size ``dt``.
+
+        Args:
+            term: Drift callable ``f(t, y, args) -> Float[Array, "2"]`` returning
+                velocity in degrees per second.
+            t: Current time, in seconds.
+            y: Current state ``[lat, lon]`` in degrees.
+            dt: Step size in seconds.
+            args: Arbitrary pytree forwarded to ``term``.
+
+        Returns:
+            Updated state ``[lat, lon]`` in degrees after one step.
+        """
         ...
 
     @abc.abstractmethod
@@ -60,12 +77,26 @@ class AbstractSolver(eqx.Module):
         args: PyTree,
         z: Float[Array, " n_noise"],
     ) -> Float[Array, "2"]:
-        """Advance SDE state y by one step using pre-sampled noise z."""
+        """Advance the SDE state by one step using pre-sampled noise.
+
+        Args:
+            term: Stochastic dynamics callable
+                ``f(t, y, args, z) -> Float[Array, "2"]`` returning the full
+                velocity (drift + noise contribution) in degrees per second.
+            t: Current time, in seconds.
+            y: Current state ``[lat, lon]`` in degrees.
+            dt: Step size in seconds.
+            args: Arbitrary pytree forwarded to ``term``.
+            z: Pre-sampled noise vector of shape ``(n_noise,)``.
+
+        Returns:
+            Updated state ``[lat, lon]`` in degrees after one step.
+        """
         ...
 
 
 class Euler(AbstractSolver):
-    """Euler / Euler-Maruyama solver."""
+    """Explicit Euler / Euler–Maruyama solver (first-order, fixed-step)."""
 
     def ode_step(
         self,
@@ -75,6 +106,18 @@ class Euler(AbstractSolver):
         dt: Float[Array, ""],
         args: PyTree,
     ) -> Float[Array, "2"]:
+        """One Euler step: ``y_new = y + term(t, y, args) * dt``.
+
+        Args:
+            term: ODE drift callable.
+            t: Current time, in seconds.
+            y: Current state ``[lat, lon]`` in degrees.
+            dt: Step size in seconds.
+            args: Arbitrary pytree forwarded to ``term``.
+
+        Returns:
+            Updated state after one Euler step.
+        """
         return y + term(t, y, args) * dt
 
     def sde_step(
@@ -86,11 +129,29 @@ class Euler(AbstractSolver):
         args: PyTree,
         z: Float[Array, " n_noise"],
     ) -> Float[Array, "2"]:
+        """One Euler–Maruyama step: ``y_new = y + term(t, y, args, z) * dt``.
+
+        Args:
+            term: SDE dynamics callable returning the full velocity for the
+                given noise sample ``z``.
+            t: Current time, in seconds.
+            y: Current state ``[lat, lon]`` in degrees.
+            dt: Step size in seconds.
+            args: Arbitrary pytree forwarded to ``term``.
+            z: Pre-sampled noise vector of shape ``(n_noise,)``.
+
+        Returns:
+            Updated state after one Euler–Maruyama step.
+        """
         return y + term(t, y, args, z) * dt
 
 
 class Heun(AbstractSolver):
-    """Heun (explicit second-order) solver."""
+    """Heun (explicit second-order, two-stage Runge–Kutta) solver.
+
+    Convergence order 2 in the ODE case; for SDEs with the same ``z`` reused
+    in the predictor and corrector, this is a Stratonovich-consistent scheme.
+    """
 
     def ode_step(
         self,
@@ -100,6 +161,18 @@ class Heun(AbstractSolver):
         dt: Float[Array, ""],
         args: PyTree,
     ) -> Float[Array, "2"]:
+        """One Heun step using the predictor–corrector trapezoidal rule.
+
+        Args:
+            term: ODE drift callable.
+            t: Current time, in seconds.
+            y: Current state ``[lat, lon]`` in degrees.
+            dt: Step size in seconds.
+            args: Arbitrary pytree forwarded to ``term``.
+
+        Returns:
+            Updated state after one Heun step.
+        """
         k1 = term(t, y, args)
         k2 = term(t + dt, y + k1 * dt, args)
         return y + 0.5 * (k1 + k2) * dt
@@ -113,7 +186,24 @@ class Heun(AbstractSolver):
         args: PyTree,
         z: Float[Array, " n_noise"],
     ) -> Float[Array, "2"]:
-        # Same z for predictor and corrector (Stratonovich-consistent).
+        """One stochastic Heun step (Stratonovich-consistent).
+
+        The same noise sample ``z`` is reused in the predictor and corrector
+        evaluations so the resulting scheme converges to the Stratonovich
+        interpretation of the SDE.
+
+        Args:
+            term: SDE dynamics callable returning the full velocity for the
+                given noise sample ``z``.
+            t: Current time, in seconds.
+            y: Current state ``[lat, lon]`` in degrees.
+            dt: Step size in seconds.
+            args: Arbitrary pytree forwarded to ``term``.
+            z: Pre-sampled noise vector of shape ``(n_noise,)``.
+
+        Returns:
+            Updated state after one stochastic Heun step.
+        """
         k1 = term(t, y, args, z)
         k2 = term(t + dt, y + k1 * dt, args, z)
         return y + 0.5 * (k1 + k2) * dt

@@ -12,14 +12,26 @@ __all__ = [
     "degrees_to_meters",
 ]
 
-EARTH_RADIUS: float = 6_371_008.8  # metres
+EARTH_RADIUS: float = 6_371_008.8
+"""Mean Earth radius in metres (IUGG 2015 mean radius)."""
 
 
 def haversine(
     y1: Float[Array, "2"],
     y2: Float[Array, "2"],
 ) -> Float[Array, ""]:
-    """Great-circle distance between two [lat, lon] points in degrees. Returns metres."""
+    """Great-circle distance between two ``[lat, lon]`` points.
+
+    Uses the spherical haversine formula with :data:`EARTH_RADIUS` as the
+    sphere radius.
+
+    Args:
+        y1: First point ``[lat, lon]`` in degrees.
+        y2: Second point ``[lat, lon]`` in degrees.
+
+    Returns:
+        Great-circle distance in metres.
+    """
     lat1 = jnp.radians(y1[0])
     lat2 = jnp.radians(y2[0])
     d = jnp.radians(y1 - y2)
@@ -32,9 +44,20 @@ def meters_to_degrees(
     arr: Float[Array, "... 2"],
     lat: Float[Array, ""],
 ) -> Float[Array, "... 2"]:
-    """Convert a [north, east] displacement in metres to [dlat, dlon] in degrees.
+    """Convert a ``[north, east]`` displacement in metres to ``[dlat, dlon]`` in degrees.
 
-    lat is the reference latitude in degrees (used for the longitude scaling).
+    Uses a flat-Earth approximation around ``lat``: the meridional component
+    is converted via ``EARTH_RADIUS``; the zonal component is additionally
+    divided by ``cos(lat)`` to account for shrinking longitude circles toward
+    the poles.
+
+    Args:
+        arr: Displacement(s) ``[north, east]`` in metres. The last axis must
+            have size 2; leading axes are passed through unchanged.
+        lat: Reference latitude in degrees, used for the longitude scaling.
+
+    Returns:
+        Same shape as ``arr``, but expressed as ``[dlat, dlon]`` in degrees.
     """
     rad = arr / EARTH_RADIUS
     deg = jnp.degrees(rad)
@@ -46,9 +69,18 @@ def degrees_to_meters(
     arr: Float[Array, "... 2"],
     lat: Float[Array, ""],
 ) -> Float[Array, "... 2"]:
-    """Convert a [dlat, dlon] displacement in degrees to [north, east] in metres.
+    """Convert a ``[dlat, dlon]`` displacement in degrees to ``[north, east]`` in metres.
 
-    lat is the reference latitude in degrees.
+    Inverse of :func:`meters_to_degrees`. Uses a flat-Earth approximation
+    around ``lat``.
+
+    Args:
+        arr: Displacement(s) ``[dlat, dlon]`` in degrees. The last axis must
+            have size 2; leading axes are passed through unchanged.
+        lat: Reference latitude in degrees, used for the longitude scaling.
+
+    Returns:
+        Same shape as ``arr``, but expressed as ``[north, east]`` in metres.
     """
     rad = jnp.radians(arr)
     meters = rad * EARTH_RADIUS
