@@ -1,17 +1,26 @@
-/* Foldable input area for notebook cells tagged "hide-input". */
+/* Foldable input area for notebook cells tagged "hide-input".
+   The full .jp-Cell-inputWrapper is moved into <details class="mx-fold">,
+   so opened cells render exactly like untagged cells (same prompt gutter,
+   same syntax highlighting, same width). */
 
-/* The wrapper produced by collapse-cells.js. */
+/* Hide the visible "hide-input" tag chip that mkdocs-jupyter injects via
+   its celltoolbar — keeps tagged cells visually uniform with untagged ones. */
+.celltag_hide-input .celltoolbar {
+  display: none !important;
+}
+
 details.mx-fold {
-  margin: 0.4rem 0;
-  border-left: 2px solid var(--md-default-fg-color--lightest, #e0e0e0);
-  padding-left: 0.6rem;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
 }
 
 details.mx-fold > summary {
   cursor: pointer;
-  font-size: 0.85em;
+  font-size: 0.78em;
   color: var(--md-default-fg-color--light, #6c6c6c);
-  padding: 0.15rem 0;
+  padding: 0.15rem 0 0.25rem 4.5rem; /* align past the "In [N]:" gutter */
   list-style: none;
   user-select: none;
 }
@@ -25,13 +34,4 @@ details.mx-fold > summary::before {
 
 details.mx-fold[open] > summary::before {
   content: "▾ Hide code";
-}
-
-details.mx-fold > summary > * { display: none; }
-
-/* Tighten the input area inside the details so it doesn't double-pad. */
-details.mx-fold .jp-InputArea,
-details.mx-fold .input,
-details.mx-fold .highlight {
-  margin-top: 0.2rem;
 }
