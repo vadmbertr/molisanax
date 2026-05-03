@@ -130,3 +130,92 @@ class TestSpatiotemporalInterp:
             )
         )(jnp.array(0.5))
         assert jnp.isfinite(g)
+
+
+class TestBilinearInterp2DLonPeriodic:
+    """Longitude wrap-around (360°→0° discontinuity) in bilinear_interp_2d."""
+
+    def setup_method(self):
+        # n_lon = 4, dx = 90°, grid = [0, 90, 180, 270] spans one full period
+        self.lats = jnp.array([0.0, 1.0])
+        self.lons = jnp.array([0.0, 90.0, 180.0, 270.0])
+        # values vary only with lon: values[:, j] = j (so we see indices directly)
+        self.values = jnp.array([[0.0, 1.0, 2.0, 3.0],
+                                 [0.0, 1.0, 2.0, 3.0]])
+
+    def test_at_node_zero(self):
+        v = bilinear_interp_2d(
+            self.values, self.lats, self.lons,
+            jnp.array(0.0), jnp.array(0.0), lon_period=360.0,
+        )
+        assert float(v) == pytest.approx(0.0)
+
+    def test_wraps_between_last_and_first(self):
+        # halfway between 270° (index 3) and 360° == 0° (index 0): (3 + 0) / 2
+        v = bilinear_interp_2d(
+            self.values, self.lats, self.lons,
+            jnp.array(0.0), jnp.array(315.0), lon_period=360.0,
+        )
+        assert float(v) == pytest.approx(1.5)
+
+    def test_negative_lon_wraps(self):
+        # -45° == 315° → same midpoint between 270 and 0
+        v = bilinear_interp_2d(
+            self.values, self.lats, self.lons,
+            jnp.array(0.0), jnp.array(-45.0), lon_period=360.0,
+        )
+        assert float(v) == pytest.approx(1.5)
+
+    def test_lon_above_period_wraps(self):
+        # 405° == 45° → midpoint between index 0 and index 1
+        v = bilinear_interp_2d(
+            self.values, self.lats, self.lons,
+            jnp.array(0.0), jnp.array(405.0), lon_period=360.0,
+        )
+        assert float(v) == pytest.approx(0.5)
+
+    def test_no_lon_period_does_not_wrap(self):
+        # Without lon_period, querying at 315° extrapolates from cell [2,3]
+        v = bilinear_interp_2d(
+            self.values, self.lats, self.lons,
+            jnp.array(0.0), jnp.array(315.0),
+        )
+        # cell [j=2..3]: values 2, 3 → at 315°, w = (315 - 180)/90 = 1.5 → 2*(1-1.5)+3*1.5 = 3.5
+        assert float(v) == pytest.approx(3.5)
+
+    def test_grad_finite_across_seam(self):
+        g = jax.grad(
+            lambda lon: bilinear_interp_2d(
+                self.values, self.lats, self.lons,
+                jnp.array(0.0), lon, lon_period=360.0,
+            )
+        )(jnp.array(355.0))
+        assert jnp.isfinite(g)
+
+    def test_jit_compatible_periodic(self):
+        @jax.jit
+        def f(lon):
+            return bilinear_interp_2d(
+                self.values, self.lats, self.lons,
+                jnp.array(0.0), lon, lon_period=360.0,
+            )
+        v = f(jnp.array(315.0))
+        assert float(v) == pytest.approx(1.5)
+
+
+class TestSpatiotemporalInterpLonPeriodic:
+    """Longitude wrap-around in spatiotemporal_interp."""
+
+    def test_wraps_in_time_and_space(self):
+        t_coords = jnp.array([0.0, 1.0])
+        lats = jnp.array([0.0, 1.0])
+        lons = jnp.array([0.0, 90.0, 180.0, 270.0])
+        # values[t, lat, lon] = lon_index (constant in t, lat)
+        slab = jnp.broadcast_to(jnp.array([0.0, 1.0, 2.0, 3.0]), (2, 4))
+        values = jnp.stack([slab, slab])  # (2, 2, 4)
+        v = spatiotemporal_interp(
+            values, t_coords, lats, lons,
+            jnp.array(0.5), jnp.array(0.0), jnp.array(315.0),
+            lon_period=360.0,
+        )
+        assert float(v) == pytest.approx(1.5)

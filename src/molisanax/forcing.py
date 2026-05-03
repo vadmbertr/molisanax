@@ -26,6 +26,15 @@ def _nearest_idx(coords: Float[Array, "n"], x: Float[Array, ""], n: int) -> Arra
     return jnp.clip(jnp.round((x - x0) / dx).astype(jnp.int32), 0, n - 1)
 
 
+def _nearest_idx_periodic(
+    coords: Float[Array, "n"], x: Float[Array, ""], n: int, period: float
+) -> Array:
+    """Nearest-neighbour index on a periodic equally-spaced 1-D grid (mod n)."""
+    x0 = coords[0]
+    dx = coords[1] - coords[0]
+    return jnp.round(((x - x0) % period) / dx).astype(jnp.int32) % n
+
+
 class Field(eqx.Module):
     """A single scalar forcing field on a (time, lat, lon) rectilinear A-grid.
 
@@ -34,12 +43,18 @@ class Field(eqx.Module):
         t_coords: 1-D time coordinates in seconds, equally spaced.
         lat_coords: 1-D latitude coordinates in degrees, equally spaced.
         lon_coords: 1-D longitude coordinates in degrees, equally spaced.
+        lon_period: If set (e.g. ``360.0``), the longitude axis is treated as
+            periodic with that period in both ``interp`` and ``neighborhood``.
+            The grid is assumed to span exactly one period: the cell at
+            ``lon_coords[-1] + dlon`` is identified with ``lon_coords[0]``.
+            ``None`` (default) means no wrapping.
     """
 
     values: Float[Array, "time lat lon"]
     t_coords: Float[Array, "time"]
     lat_coords: Float[Array, "lat"]
     lon_coords: Float[Array, "lon"]
+    lon_period: float | None = eqx.field(static=True, default=None)
 
     def interp(
         self,
@@ -57,11 +72,12 @@ class Field(eqx.Module):
         Returns:
             Interpolated scalar value at the query point. Outside the grid the
             interpolation extrapolates linearly (clamping to grid boundaries
-            beyond one cell).
+            beyond one cell). When ``lon_period`` is set, longitude wraps
+            instead of extrapolating.
         """
         return spatiotemporal_interp(
             self.values, self.t_coords, self.lat_coords, self.lon_coords,
-            t, lat, lon,
+            t, lat, lon, lon_period=self.lon_period,
         )
 
     def neighborhood(
@@ -85,7 +101,9 @@ class Field(eqx.Module):
 
         Returns:
             Array of shape (2*t_window+1, 2*lat_window+1, 2*lon_window+1).
-            The window is clamped to the grid boundary near the edges.
+            Time and latitude windows are clamped to the grid boundary near the
+            edges. The longitude window wraps modulo ``lon_period`` when that
+            attribute is set, otherwise it is clamped like the others.
         """
         nt   = self.t_coords.shape[0]
         nlat = self.lat_coords.shape[0]
@@ -97,17 +115,27 @@ class Field(eqx.Module):
 
         it   = _nearest_idx(self.t_coords,   t,   nt)
         ilat = _nearest_idx(self.lat_coords, lat, nlat)
-        ilon = _nearest_idx(self.lon_coords, lon, nlon)
 
         it_start   = jnp.clip(it   - t_window,   0, nt   - wt)
         ilat_start = jnp.clip(ilat - lat_window, 0, nlat - wlat)
-        ilon_start = jnp.clip(ilon - lon_window, 0, nlon - wlon)
 
-        return jax.lax.dynamic_slice(
+        if self.lon_period is None:
+            ilon = _nearest_idx(self.lon_coords, lon, nlon)
+            ilon_start = jnp.clip(ilon - lon_window, 0, nlon - wlon)
+            return jax.lax.dynamic_slice(
+                self.values,
+                (it_start, ilat_start, ilon_start),
+                (wt, wlat, wlon),
+            )
+
+        ilon = _nearest_idx_periodic(self.lon_coords, lon, nlon, self.lon_period)
+        block = jax.lax.dynamic_slice(
             self.values,
-            (it_start, ilat_start, ilon_start),
-            (wt, wlat, wlon),
+            (it_start, ilat_start, 0),
+            (wt, wlat, nlon),
         )
+        lon_idx = (ilon - lon_window + jnp.arange(wlon)) % nlon
+        return block[:, :, lon_idx]
 
 
 class Dataset(eqx.Module):
@@ -170,6 +198,7 @@ class Dataset(eqx.Module):
         lat: Array,
         lon: Array,
         dtype: DTypeLike = jnp.float32,
+        lon_period: float | None = None,
     ) -> Dataset:
         """Build a Dataset from numpy or JAX arrays.
 
@@ -179,6 +208,9 @@ class Dataset(eqx.Module):
             lat: 1-D latitude coordinate array (degrees), equally spaced.
             lon: 1-D longitude coordinate array (degrees), equally spaced.
             dtype: JAX dtype for all arrays (default float32).
+            lon_period: If set (e.g. ``360.0``), all fields are constructed
+                with periodic longitude wrapping. The grid must span exactly
+                one period.
 
         Returns:
             Dataset with all fields on the given grid.
@@ -192,6 +224,7 @@ class Dataset(eqx.Module):
                 t_coords=t_arr,
                 lat_coords=lat_arr,
                 lon_coords=lon_arr,
+                lon_period=lon_period,
             )
             for name, v in fields.items()
         }
@@ -203,6 +236,7 @@ class Dataset(eqx.Module):
         fields: dict[str, str],
         coordinates: dict[str, str],
         dtype: DTypeLike = jnp.float32,
+        lon_period: float | None = None,
     ) -> Dataset:
         """Load a Dataset from an xarray Dataset (zarr or netCDF backed).
 
@@ -211,6 +245,9 @@ class Dataset(eqx.Module):
             fields: Mapping {internal_name: xarray_variable_name}.
             coordinates: Mapping with keys "time", "lat", "lon" → xarray coord names.
             dtype: JAX dtype for all arrays (default float32).
+            lon_period: If set (e.g. ``360.0``), all fields are constructed
+                with periodic longitude wrapping. The grid must span exactly
+                one period.
 
         Returns:
             Dataset with all fields loaded into host memory as JAX arrays.
@@ -232,4 +269,5 @@ class Dataset(eqx.Module):
             lat=ds[coordinates["lat"]].values,
             lon=ds[coordinates["lon"]].values,
             dtype=dtype,
+            lon_period=lon_period,
         )
