@@ -1,37 +1,43 @@
 /* Foldable input area for notebook cells tagged "hide-input".
-   The full .jp-Cell-inputWrapper is moved into <details class="mx-fold">,
-   so opened cells render exactly like untagged cells (same prompt gutter,
-   same syntax highlighting, same width). */
+   We use a plain <div class="mx-fold"> + <button> rather than
+   <details>/<summary> because Material for MkDocs applies admonition
+   styling to <details>, which makes folded cells look unlike untagged
+   cells. The wrapper below is intentionally style-neutral. */
 
-/* Hide the visible "hide-input" tag chip that mkdocs-jupyter injects via
-   its celltoolbar — keeps tagged cells visually uniform with untagged ones. */
+/* Hide the visible "hide-input" tag chip mkdocs-jupyter injects via
+   .celltoolbar — keeps tagged cells visually uniform with untagged ones. */
 .celltag_hide-input .celltoolbar {
   display: none !important;
 }
 
-details.mx-fold {
+.mx-fold {
   margin: 0;
   padding: 0;
   border: none;
   background: none;
+  box-shadow: none;
 }
 
-details.mx-fold > summary {
-  cursor: pointer;
-  font-size: 0.78em;
+.mx-fold-toggle {
+  appearance: none;
+  background: none;
+  border: none;
   color: var(--md-default-fg-color--light, #6c6c6c);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78em;
+  margin: 0;
   padding: 0.15rem 0 0.25rem 4.5rem; /* align past the "In [N]:" gutter */
-  list-style: none;
+  text-align: left;
   user-select: none;
 }
 
-details.mx-fold > summary::-webkit-details-marker { display: none; }
-
-details.mx-fold > summary::before {
-  content: "▸ Show code";
-  display: inline-block;
+.mx-fold-toggle:hover,
+.mx-fold-toggle:focus {
+  color: var(--md-default-fg-color, #000);
+  outline: none;
 }
 
-details.mx-fold[open] > summary::before {
-  content: "▾ Hide code";
+.mx-fold--closed > .mx-fold-body {
+  display: none;
 }
