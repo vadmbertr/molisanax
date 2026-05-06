@@ -44,6 +44,12 @@ jobs:
         run: sphinx-build -b myst docs/_sphinx docs/_sphinx/_build/myst
 
       - name: Build MyST site
+        # GitHub Pages serves the site at https://<owner>.github.io/<repo>/,
+        # so mystmd needs BASE_URL set to that path prefix; without it the
+        # rendered HTML loads assets from / and shows the
+        # "Site not loading correctly?" overlay.
+        env:
+          BASE_URL: /molisanax
         run: myst build --html --execute --strict
 
       - name: Upload artifact
