@@ -71,6 +71,10 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+# mystmd / Jupyter Book 2 build artifacts
+_build/
+docs/_sphinx/_build/
+
 # PyBuilder
 .pybuilder/
 target/
