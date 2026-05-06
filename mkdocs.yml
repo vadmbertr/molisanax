@@ -30,6 +30,13 @@ repo_name: vadmbertr/molisanax
 
 strict: true
 
+# The _sphinx/ subtree drives the JB2/mystmd build (sphinx-ext-mystmd ->
+# *.myst.json AST). It must not be ingested by mkdocs-jupyter, which would
+# otherwise pick up _sphinx/conf.py as a notebook source.
+exclude_docs: |
+  _sphinx/
+  myst-requirements.txt
+
 not_in_nav: |
   /implementation_plan.md
   /project_plan.md
