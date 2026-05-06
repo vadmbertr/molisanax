@@ -18,7 +18,11 @@ zarr>=2.17.0
 netcdf4>=1.6.0
 
 # Notebook execution
+#   ipykernel registers the Python kernel; jupyter-server is what mystmd
+#   actually launches in the background when --execute is requested
+#   (without it: "Could not load Jupyter session manager to run executable nodes")
 ipykernel>=6.29
+jupyter-server>=2.14
 matplotlib>=3.8
 optimistix>=0.0.9
 cmocean>=4.0
