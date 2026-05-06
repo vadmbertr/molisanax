@@ -1,0 +1,33 @@
+# See https://mystmd.org/guide/frontmatter
+version: 1
+project:
+  title: molisanax
+  description: Differentiable Lagrangian simulator for ocean surface trajectories (JAX/Equinox).
+  github: https://github.com/vadmbertr/molisanax
+  license: MIT
+  authors:
+    - name: Vadim Bertrand
+      github: vadmbertr
+  toc:
+    - file: README.md
+    - title: Getting started
+      file: docs/getting_started.ipynb
+    - title: API reference
+      children:
+        - pattern: docs/_sphinx/_build/myst/**.myst.json
+  exclude:
+    - docs/implementation_plan.md
+    - docs/project_plan.md
+    - docs/project_status.md
+    - docs/index.md
+    - docs/api.md
+    - docs/_sphinx/conf.py
+    - docs/_sphinx/**/*.rst
+    - docs/_static/**
+    - docs/requirements.txt
+    - docs/myst-requirements.txt
+    - mkdocs.yml
+site:
+  template: book-theme
+  options:
+    logo_text: molisanax
