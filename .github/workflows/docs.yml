@@ -1,8 +1,8 @@
 name: Docs
 
+# Auto-trigger disabled while evaluating JB2/mystmd (docs-myst.yml).
+# Re-enable by restoring the `push` trigger once the comparison concludes.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
