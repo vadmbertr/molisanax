@@ -13,15 +13,16 @@ project:
     - title: Getting started
       file: docs/getting_started.ipynb
     - title: API reference
-      file: docs/api.md
       children:
-        - pattern: docs/_api/**/*.md
+        - pattern: docs/_sphinx/_build/myst/**.myst.json
   exclude:
     - docs/implementation_plan.md
     - docs/project_plan.md
     - docs/project_status.md
     - docs/index.md
-    - docs/_sphinx/**
+    - docs/api.md
+    - docs/_sphinx/conf.py
+    - docs/_sphinx/**/*.rst
     - docs/_static/**
     - docs/requirements.txt
     - docs/myst-requirements.txt

@@ -1,12 +1,12 @@
 # Python deps for the JB2/mystmd build:
-#   1. sphinx + sphinx-autodoc2  -> generates MyST API stubs into docs/_api/
+#   1. sphinx + sphinx-ext-mystmd -> emits *.myst.json AST consumed by mystmd
+#                                    (autodoc/napoleon parse Google docstrings)
 #   2. ipykernel + matplotlib +   -> notebook execution at `myst build --execute`
 #      runtime deps below
 
-# Stub generation
+# API reference pipeline (Sphinx -> mystmd AST)
 sphinx>=7.3
-sphinx-autodoc2>=0.5
-myst-parser>=3.0
+sphinx-ext-mystmd
 
 # Runtime imports needed by autodoc2 to introspect the molisanax package
 jax>=0.4.30
