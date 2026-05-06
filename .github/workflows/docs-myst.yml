@@ -40,8 +40,8 @@ jobs:
           pip install -e .
           pip install -r docs/myst-requirements.txt
 
-      - name: Generate API stubs (sphinx-autodoc2 -> docs/_api/)
-        run: sphinx-build -W -b dummy docs/_sphinx docs/_sphinx/_build
+      - name: Build API AST (sphinx-ext-mystmd -> *.myst.json)
+        run: sphinx-build -b myst docs/_sphinx docs/_sphinx/_build/myst
 
       - name: Build MyST site
         run: myst build --html --execute --strict
