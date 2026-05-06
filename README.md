@@ -4,7 +4,7 @@
 
 `molisanax` integrates particle trajectories on the ocean surface by solving ODEs and SDEs over user-supplied forcing fields (e.g. surface currents). Every computation is fully differentiable via JAX automatic differentiation — both forward-mode (`jax.jvp`) and reverse-mode (`jax.grad`) are supported.
 
-📖 **Documentation:** <https://vadmbertr.github.io/molisanax/> — full API reference and a runnable [getting-started notebook](https://vadmbertr.github.io/molisanax/getting_started/).
+📖 **Documentation:** <https://vadmbertr.github.io/molisanax/> — full API reference and a runnable [getting-started notebook](docs/getting_started.ipynb).
 
 ## Project Status
 
@@ -170,7 +170,7 @@ li_ens  = liu_index(ensemble, reference, ensemble=True)            # (S, T)
 
 ## API Reference
 
-The full API reference — every public symbol, signature, and docstring — lives on the documentation site: <https://vadmbertr.github.io/molisanax/api/>.
+The full API reference — every public symbol, signature, and docstring — lives on the documentation site: <https://vadmbertr.github.io/molisanax/api>.
 
 ## Design
 
