@@ -35,7 +35,7 @@ autodoc_default_options = {
     "show-inheritance": True,
 }
 
-master_doc = "index"
+master_doc = "api"
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 

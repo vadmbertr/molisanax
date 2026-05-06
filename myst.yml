@@ -31,3 +31,4 @@ site:
   template: book-theme
   options:
     logo_text: molisanax
+    style: docs/_static/myst-extra.css
