@@ -1,0 +1,14 @@
+/* mystmd book-theme overrides for the molisanax docs site. */
+
+/* API signatures: long Python signatures (autodoc emits them as <pre> /
+   inline code via sphinx-ext-mystmd) overflow the content column on
+   narrow widths. Allow them to wrap on whitespace and on long
+   identifiers without changing the visual style. */
+pre,
+pre code,
+.api-signature,
+[class*="signature"] {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
