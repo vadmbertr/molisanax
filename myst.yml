@@ -10,7 +10,7 @@ project:
       github: vadmbertr
   toc:
     - file: README.md
-    - title: Getting started
+    - title: Tutorial
       file: docs/getting_started.ipynb
     - title: API reference
       children:
