@@ -4,11 +4,12 @@
 
 `molisanax` integrates particle trajectories on the ocean surface by solving ODEs and SDEs over user-supplied forcing fields (e.g. surface currents). Every computation is fully differentiable via JAX automatic differentiation — both forward-mode (`jax.jvp`) and reverse-mode (`jax.grad`) are supported.
 
-📖 **Documentation:** <https://vadmbertr.github.io/molisanax/> — full API reference and a runnable [tutorial notebook](docs/getting_started.ipynb).
+📖 **Documentation:** <https://vadmbertr.github.io/molisanax/> — full API reference and a runnable [tutorial notebook](docs/tutorial.ipynb).
 
 ## Project Status
 
 **v0.1.0 — fourth iteration.** Core functionality implemented and tested (89 tests):
+
 - Bilinear interpolation of rectilinear A-grid forcing fields, with neighbourhood extraction
 - Unified `solve()` function — ODE/SDE mode selected by caller (no introspection)
 - Euler and Heun solvers; SDE term receives noise vector `z` directly for full flexibility

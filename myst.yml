@@ -11,7 +11,7 @@ project:
   toc:
     - file: README.md
     - title: Tutorial
-      file: docs/getting_started.ipynb
+      file: docs/tutorial.ipynb
     - title: API reference
       children:
         - pattern: docs/_sphinx/_build/myst/**.myst.json
