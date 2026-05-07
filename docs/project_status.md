@@ -19,17 +19,19 @@
 
 **Tests**: 104 tests, all passing (`pytest -q`).
 
-**Documentation site**: hosted on GitHub Pages at <https://vadmbertr.github.io/molisanax/> (MyST / Jupyter Book 2 + `sphinx-ext-mystmd` for the API reference). Includes a runnable getting-started notebook at `docs/getting_started.ipynb`. Built and deployed by `.github/workflows/docs.yml`.
+**Documentation site**: hosted on GitHub Pages at <https://vadmbertr.github.io/molisanax/> (MyST / Jupyter Book 2 + `sphinx-ext-mystmd` for the API reference). Includes a runnable tutorial notebook at `docs/tutorial.ipynb`. Built and deployed by `.github/workflows/docs.yml`.
 
 **Differentiability**: `jax.grad` and `jax.jvp` through `solve()` in ODE mode verified in tests. `jax.vmap` over SDE ensemble verified.
 
 ### API highlights
 
 **Unified solver**: a single `solve(term, args, y0, ts, solver, *, key, n_samples, n_noise, noise)` function; mode is selected by the caller, not inferred from term output:
+
 - ODE: no `key`/`noise`/`n_noise` provided. `term(t, y, args) -> Float[Array, "2"]`.
 - SDE: at least one of `key`, `noise`, or `n_noise` provided. `term(t, y, args, z) -> Float[Array, "2"]` — the term receives `z` directly and returns the full velocity. `dy = term(..., z) * dt`.
 
 **SDE noise**: two modes:
+
 1. Auto-sampled: pass `key` + `n_noise` (and optional `n_samples`) — draws `(n_samples, n_steps, n_noise)` before `vmap`/`scan`.
 2. Pre-sampled: pass `noise` of shape `(n_steps, n_noise)` or `(S, n_steps, n_noise)` — `n_noise` inferred from `noise.shape[-1]`.
 
