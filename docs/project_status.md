@@ -19,7 +19,7 @@
 
 **Tests**: 104 tests, all passing (`pytest -q`).
 
-**Documentation site**: hosted on GitHub Pages at <https://vadmbertr.github.io/molisanax/> (MkDocs + Material + `mkdocstrings`). Includes a runnable getting-started notebook at `docs/getting_started.ipynb`. Built and deployed by `.github/workflows/docs.yml` on every push to `main`.
+**Documentation site**: hosted on GitHub Pages at <https://vadmbertr.github.io/molisanax/> (MyST / Jupyter Book 2 + `sphinx-ext-mystmd` for the API reference). Includes a runnable getting-started notebook at `docs/getting_started.ipynb`. Built and deployed by `.github/workflows/docs-myst.yml`.
 
 **Differentiability**: `jax.grad` and `jax.jvp` through `solve()` in ODE mode verified in tests. `jax.vmap` over SDE ensemble verified.
 
