@@ -1,13 +1,48 @@
 /* mystmd book-theme overrides for the molisanax docs site. */
 
-/* API signatures: long Python signatures (autodoc emits them as <pre> /
-   inline code via sphinx-ext-mystmd) overflow the content column on
-   narrow widths. Allow them to wrap on whitespace and on long
-   identifiers without changing the visual style. */
+/*
+ * Wrap long Python signatures inside the API reference.
+ *
+ * sphinx-ext-mystmd renders an autodoc signature as a <dt> (definition
+ * term) whose contents are <span class="sphinx-desc-..."> children
+ * (sphinx-desc-name, sphinx-desc-parameterlist, sphinx-desc-sig-name,
+ * etc.) — not <pre>/<code>. By default the styling treats them as
+ * pre-formatted monospace, so a long signature like
+ *
+ *   class molisanax.forcing.Field(values: Float[Array, 'time lat lon'],
+ *                                 t_coords: Float[Array, 'time'], ...)
+ *
+ * stays on a single line and the page grows a horizontal scrollbar.
+ *
+ * Force every level of the signature tree to wrap at whitespace (and,
+ * as a fallback, anywhere a long identifier would otherwise overflow),
+ * and make sure the dt and its ancestors can shrink below their content
+ * width — the `min-width: 0` is required when ancestors use flex/grid.
+ */
+
+dl,
+dl > dt,
+dl > dd {
+  max-width: 100%;
+  min-width: 0;
+}
+
+dl > dt {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+[class^="sphinx-desc-"],
+[class*=" sphinx-desc-"] {
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Code blocks: also wrap rather than overflow horizontally. */
 pre,
-pre code,
-.api-signature,
-[class*="signature"] {
+pre code {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
