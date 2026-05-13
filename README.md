@@ -8,10 +8,11 @@
 
 ## Project Status
 
-**v0.1.0 — fifth iteration.** Core functionality implemented and tested (137 tests):
+**v0.1.0 — fifth iteration.** Core functionality implemented and tested (183 tests):
 
 - Bilinear interpolation of rectilinear forcing fields, with neighbourhood extraction
 - A-grid and NEMO-convention Arakawa C-grid forcing layouts (`Dataset.from_arrays_cgrid` / `from_xarray_cgrid`)
+- Coastal robustness on A-grid: NaN-inferred land masks, inverse-distance partial-cell bilinear, and an opt-in partial-slip scheme via `Dataset.velocity_interp`
 - Unified `solve()` function — ODE/SDE mode selected by caller (no introspection)
 - Euler, Heun and RK4 solvers; SDE term receives noise vector `z` directly for full flexibility
 - Forward or backwards-in-time integration (pass an increasing or decreasing `ts`)
@@ -158,14 +159,65 @@ dataset = Dataset.from_xarray_cgrid(
 )
 ```
 
-> **Coasts.** molisanax currently has **no land-mask awareness**. NaN-filled
-> land in the input silently corrupts trajectories; zero-filled land on an
-> A-grid causes the classic "stuck particle" artefact at coasts. C-grid
-> forcing (above) handles coasts correctly *only* when U and V on
-> land-adjacent faces are exactly zero (NEMO convention) — the face-normal
-> velocity then naturally vanishes at the coast. See
-> [`docs/project_status.md`](docs/project_status.md) for details. Coastal
-> robustness is a planned follow-up iteration.
+### Coastal forcing
+
+Real ocean forcing has land. By default the loaders detect land cells
+automatically:
+
+```python
+# u_data has NaN at every land cell (CMEMS / CF convention)
+dataset = Dataset.from_arrays({"u": u_data, "v": v_data}, t=t, lat=lat, lon=lon)
+# NaN was replaced with 0 in the stored values; a 2-D bool mask
+# was inferred from the NaN locations and attached to each Field:
+# dataset["u"].mask.shape == (nlat, nlon)
+```
+
+If your data marks land with zeros (NEMO convention) or a custom flag,
+pass an explicit mask instead:
+
+```python
+land_mask = (raw_bathy == 0)               # True where land
+dataset = Dataset.from_arrays(
+    {"u": u_data, "v": v_data}, t=t, lat=lat, lon=lon,
+    masks={"u": land_mask, "v": land_mask},
+)
+```
+
+The mask is consumed by `Field.interp` to switch from naive bilinear to
+**inverse-distance partial-cell weighting** whenever a cell straddles
+the coast: land corners are dropped and the remaining ocean corners are
+weighted by `1 / d²` from the query point. Fully land-bound cells
+return `0`. This eliminates the "stuck particle" artefact that plagues
+naive bilinear interpolation on A-grid coastal data — particles
+released near a coast slide along it at the correct ocean velocity
+instead of stalling.
+
+For richer wall-physics control, use `Dataset.velocity_interp` to
+interpolate `(U, V)` jointly with an opt-in partial-slip correction:
+
+```python
+def my_term(t, y, args):
+    dataset = args
+    vel = dataset.velocity_interp(t, y[0], y[1], scheme="partialslip")
+    return meters_to_degrees(vel, y[0])   # vel is [v, u] = [dlat/dt, dlon/dt]
+```
+
+`scheme="default"` (the default) composes per-field `Field.interp`
+(inverse-distance when a mask is present). `scheme="partialslip"`
+applies a tunable wall-slip correction near fully-land edges:
+`U` near a latitudinal coast is rescaled by `(slip_a + slip_b * wl)`,
+and `V` near a longitudinal coast by `(slip_a + slip_b * wj)`. The
+default `slip_a = slip_b = 0.5` gives a half-slip wall; `slip_a = 1,
+slip_b = 0` recovers full free-slip. Partial-slip is A-grid only —
+calling it on a C-grid dataset raises `NotImplementedError`.
+
+C-grid forcing handles coasts correctly without any mask, **provided
+U and V at land-adjacent faces are exactly zero** (the NEMO output
+convention): the face-normal velocity then vanishes at the coast by
+construction.
+
+All three coastal paths (inverse-distance, partial-slip, naive
+bilinear) are gradient-safe under `jax.grad` and `jax.jvp`.
 
 ### Neighbourhood extraction
 

@@ -2,7 +2,7 @@
 
 *Last updated: 2026-05-13*
 
-## Version: 0.1.0 — Fifth iteration (Arakawa C-grid metadata layer)
+## Version: 0.1.0 — Sixth iteration (Coastal robustness)
 
 ### What is implemented
 
@@ -12,13 +12,13 @@
 |---|---|---|
 | `_safe_math.py` | Done | `safe_sqrt`, `safe_log`, `safe_divide` — gradient-safe math utilities |
 | `geo.py` | Done | `EARTH_RADIUS=6_371_008.8 m`, `haversine`, `meters_to_degrees`, `degrees_to_meters` |
-| `interpolation.py` | Done | 1D linear, 2D bilinear, trilinear (time+space); O(1) index via closed-form floor — no searchsorted; opt-in periodic longitude via `lon_period` |
-| `forcing.py` | Done | `Field` (with `.interp`, `.neighborhood`, and `stagger` metadata), `Dataset.from_xarray`/`from_arrays` (A-grid), `Dataset.from_xarray_cgrid`/`from_arrays_cgrid` (NEMO-convention C-grid); (time, lat, lon) axis order; periodic longitude via `lon_period`; both A-grid loaders accept NumPy `datetime64` time arrays and auto-convert to int seconds since the Unix epoch |
+| `interpolation.py` | Done | 1D linear, 2D bilinear, trilinear (time+space); O(1) index via closed-form floor — no searchsorted; opt-in periodic longitude via `lon_period`; opt-in 2-D land mask → inverse-distance partial-cell on coastal cells, `0` on fully-land cells; `bilinear_velocity_partialslip_2d` and `spatiotemporal_velocity_partialslip` joint (U, V) kernels for A-grid partial-slip wall corrections |
+| `forcing.py` | Done | `Field` (with `.interp`, `.neighborhood`, `stagger` metadata, and an optional 2-D `mask`); `Dataset.from_xarray`/`from_arrays` (A-grid) and `Dataset.from_xarray_cgrid`/`from_arrays_cgrid` (NEMO-convention C-grid) all accept a `masks` kwarg, auto-infer land masks from NaN otherwise, and replace NaN values with 0; `Dataset.velocity_interp(scheme="default"|"partialslip")` joint (U, V) entry point; (time, lat, lon) axis order; periodic longitude via `lon_period`; both A-grid loaders accept NumPy `datetime64` time arrays and auto-convert to int seconds since the Unix epoch |
 | `grid.py` | Done | `Grid` metadata: centre coordinates plus `grid_type` (`"rectilinear"`/`"curvilinear"`) and `stagger_type` (`"A"`/`"C"`); `u_face_coords()` / `v_face_coords()` derive NEMO half-cell-shifted coordinates for C-grid loaders |
 | `solver.py` | Done | `Euler`, `Heun`, `RK4`; unified `solve()` — ODE/SDE detected by caller (`key`/`noise`/`n_noise`); SDE term receives `z` directly; backwards-in-time integration supported by passing a strictly decreasing `ts` |
 | `metrics.py` | Done | `separation_distance`, `normalized_separation_distance`, `liu_index`; all support `ensemble=True` |
 
-**Tests**: 137 tests, all passing (`pytest -q`).
+**Tests**: 183 tests, all passing (`pytest -q`).
 
 **Documentation site**: hosted on GitHub Pages at <https://vadmbertr.github.io/molisanax/> (MyST / Jupyter Book 2 + `sphinx-ext-mystmd` for the API reference). Includes a runnable tutorial notebook at `docs/tutorial.ipynb`. Built and deployed by `.github/workflows/docs.yml`.
 
@@ -53,6 +53,16 @@
 
 The C-grid path reduces to bilinear on the field's own coordinates because shifting an equally-spaced centre grid by half a cell preserves equal spacing — no separate interpolation kernel is needed. The Delandmeter–van Sebille (2019) divergence-aware analytical C-grid scheme is not implemented; planned as a future opt-in (`Dataset.cgrid_velocity(t, lat, lon)` method) that would not alter the per-`Field` API.
 
+### Coastal robustness
+
+| Layer | Behaviour | Status |
+|---|---|---|
+| Loaders | Auto-infer a 2-D `Field.mask` from `isnan(values)` across the time axis; replace NaN with 0 in stored values. Explicit `masks={"u": ..., "v": ...}` argument overrides inference. Works for all four loaders (A- and C-grid). 2-D mask only — wet-and-dry / 3-D masks are rejected. | Done |
+| `Field.interp` (mask present) | Inverse-distance partial-cell weighting on coastal cells (drops land corners, weights ocean corners by `1 / (α² + β² + ε)` in normalised cell coordinates); returns `0` on fully-land cells. Bit-exact identical to naive bilinear when no corner is land. | Done |
+| `Dataset.velocity_interp(scheme="default")` | Composes per-field `Field.interp` for `(V, U)`. Recommended entry point for terms that need joint velocity. | Done |
+| `Dataset.velocity_interp(scheme="partialslip")` | A-grid only. Reads U and V jointly with the AND of their masks; rescales `U` near latitudinal coasts by `(slip_a + slip_b * wl)` and `V` near longitudinal coasts by `(slip_a + slip_b * wj)`. Defaults `slip_a = slip_b = 0.5` (half-slip); `1, 0` is free-slip; `0, 1` recovers naive bilinear. Raises `NotImplementedError` on C-grid datasets. Raises `ValueError` if either component lacks a mask. | Done |
+| Gradient safety | All three coastal paths use `safe_divide` and/or explicit polynomial reformulations to keep both `jax.grad` and `jax.jvp` NaN-free at corners, on land, in mixed cells, and inside fully-land cells. | Done |
+
 ### What is not yet implemented (deferred)
 
 - Adaptive step size
@@ -60,18 +70,16 @@ The C-grid path reduces to bilinear on the field's own coordinates because shift
 - Curvilinear-grid interpolation (storable structurally, but `Field.interp` raises)
 - Arakawa B-grid and D-grid layouts
 - Analytical C-grid velocity scheme (Doos / CGS / van Sebille 2019)
-- **Land-mask awareness** — see *Known limitations* below; planned as a separate "coastal robustness" iteration
+- Wet-and-dry / time-varying masks (the mask is currently a 2-D snapshot)
+- Per-particle "stuck" status flags (would require breaking the flat `Float[Array, "2"]` state model)
 - Auto-detection of periodic longitude (currently opt-in via `lon_period`)
 - Benchmark suite (convergence order, performance)
 
 ### Known limitations
 
-- **No land handling.** `Field.interp` is naive bilinear with no mask, NaN check, or partial-cell correction. Consequences:
-  - **NaN-filled land** (CMEMS convention): a single NaN corner contaminates the bilinear weighted sum → NaN velocity → NaN trajectory. molisanax raises no error; corruption is silent.
-  - **Zero-filled land** (NEMO convention, A-grid): velocity asymptotes to zero as a particle approaches the coast, and the particle stalls at the boundary — the Parcels "stuck particle" failure mode.
-  - **C-grid + zero-filled land faces**: the face-normal velocity vanishes correctly at coasts and particles slide along them, which is why C-grid forcing is the safer choice for coastal regions even though molisanax has no explicit coastal logic.
 - **Longitude wrap**: opt-in only. Pass `lon_period=360.0` to `bilinear_interp_2d`/`spatiotemporal_interp`, or set the `lon_period` attribute on `Field` (also accepted by `Dataset.from_arrays`/`Dataset.from_xarray`). The grid must span exactly one period (no duplicated seam cell). Without it, interpolation extrapolates linearly past the boundary. C-grid U/V faces never wrap (their coordinate arrays no longer span a full period); tracer fields on a C-grid centre grid do wrap when `lon_period` is set.
 - **Extrapolation**: Interpolation clamps to grid boundary outside the domain (latitude axis, and longitude when `lon_period` is not set).
+- **C-grid coasts rely on zero-velocity convention**: a C-grid forcing without explicit masks works correctly near coasts *only* when U and V are exactly zero on land-adjacent faces (NEMO output convention). Non-zero spurious values on land faces will leak into trajectories; the `masks=` argument is the recommended remedy.
 - **Memory for long trajectories**: reverse-mode AD through `solve()` stores one checkpoint per `lax.scan` step (O(T) memory). Use forward-mode (`jax.jvp`) for very long trajectories.
 
 ### Architecture summary
