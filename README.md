@@ -8,9 +8,10 @@
 
 ## Project Status
 
-**v0.1.0 — fourth iteration.** Core functionality implemented and tested (89 tests):
+**v0.1.0 — fifth iteration.** Core functionality implemented and tested (137 tests):
 
-- Bilinear interpolation of rectilinear A-grid forcing fields, with neighbourhood extraction
+- Bilinear interpolation of rectilinear forcing fields, with neighbourhood extraction
+- A-grid and NEMO-convention Arakawa C-grid forcing layouts (`Dataset.from_arrays_cgrid` / `from_xarray_cgrid`)
 - Unified `solve()` function — ODE/SDE mode selected by caller (no introspection)
 - Euler, Heun and RK4 solvers; SDE term receives noise vector `z` directly for full flexibility
 - Forward or backwards-in-time integration (pass an increasing or decreasing `ts`)
@@ -120,6 +121,51 @@ u_data = np.ones((5, 100, 100), dtype=np.float32)
 
 dataset = Dataset.from_arrays({"u": u_data}, t=t, lat=lat, lon=lon)
 ```
+
+### Loading C-grid forcing (NEMO convention)
+
+For data on an Arakawa C-grid, U lives on the east faces of the centre cells
+(shape `(time, nlat, nlon - 1)`) and V on the north faces (shape
+`(time, nlat - 1, nlon)`). `from_arrays_cgrid` auto-derives the staggered
+coordinates as half-cell shifts of the centre grid:
+
+```python
+from molisanax import Dataset
+
+dataset = Dataset.from_arrays_cgrid(
+    t, center_lat, center_lon,
+    u_values,                       # (T, nlat, nlon - 1)  on east faces
+    v_values,                       # (T, nlat - 1, nlon)  on north faces
+    tracers={"sst": sst_values},    # optional, at cell centres (T, nlat, nlon)
+)
+# dataset["u"].stagger == "u_face"
+# dataset["v"].stagger == "v_face"
+# dataset.grid.stagger_type == "C"
+```
+
+The same `term` you wrote for A-grid forcing works unchanged — each `Field`
+stores its own (already-shifted) coordinates, so `Field.interp` applies the
+correct bilinear-on-shifted-coords sample at the particle position.
+
+xarray analogue:
+
+```python
+dataset = Dataset.from_xarray_cgrid(
+    ds,
+    u_name="uo", v_name="vo",
+    coordinates={"time": "time", "lat": "lat", "lon": "lon"},  # centre coords
+    tracers={"sst": "thetao"},
+)
+```
+
+> **Coasts.** molisanax currently has **no land-mask awareness**. NaN-filled
+> land in the input silently corrupts trajectories; zero-filled land on an
+> A-grid causes the classic "stuck particle" artefact at coasts. C-grid
+> forcing (above) handles coasts correctly *only* when U and V on
+> land-adjacent faces are exactly zero (NEMO convention) — the face-normal
+> velocity then naturally vanishes at the coast. See
+> [`docs/project_status.md`](docs/project_status.md) for details. Coastal
+> robustness is a planned follow-up iteration.
 
 ### Neighbourhood extraction
 
