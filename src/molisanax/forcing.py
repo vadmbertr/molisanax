@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 
 from ._types import Array, Float
+from .grid import Grid
 from .interpolation import spatiotemporal_interp
 
 if TYPE_CHECKING:
@@ -53,7 +54,7 @@ def _nearest_idx_periodic(
 
 
 class Field(eqx.Module):
-    """A single scalar forcing field on a (time, lat, lon) rectilinear A-grid.
+    """A single scalar forcing field on a (time, lat, lon) rectilinear grid.
 
     Attributes:
         values: Field values, shape ``(time, lat, lon)``.
@@ -65,6 +66,17 @@ class Field(eqx.Module):
             The grid is assumed to span exactly one period: the cell at
             ``lon_coords[-1] + dlon`` is identified with ``lon_coords[0]``.
             ``None`` (default) means no wrapping.
+        stagger: Position of this field on the parent grid. ``"center"``
+            (default) is the A-grid / tracer position; ``"u_face"`` and
+            ``"v_face"`` mark the eastern and northern velocity faces of a
+            NEMO-convention Arakawa C-grid. The coordinate arrays
+            (``lat_coords``, ``lon_coords``) must already describe the
+            stagger position — they are what ``interp`` consults — so a
+            C-grid ``Field`` with ``stagger="u_face"`` carries
+            half-cell-shifted longitudes. Treat this attribute as metadata
+            for downstream code that needs to distinguish velocity faces
+            from centres; ``Field.interp`` itself is the same bilinear
+            scheme regardless.
     """
 
     values: Float[Array, "time lat lon"]
@@ -72,6 +84,9 @@ class Field(eqx.Module):
     lat_coords: Float[Array, "lat"]
     lon_coords: Float[Array, "lon"]
     lon_period: float | None = eqx.field(static=True, default=None)
+    stagger: Literal["center", "u_face", "v_face"] = eqx.field(
+        static=True, default="center"
+    )
 
     def interp(
         self,
@@ -159,11 +174,16 @@ class Dataset(eqx.Module):
     """Collection of named :class:`Field` instances sharing a common grid.
 
     Attributes:
-        fields: Mapping ``{field_name: Field}``. All fields are assumed to be
-            defined on the same ``(time, lat, lon)`` grid.
+        fields: Mapping ``{field_name: Field}``. For A-grid datasets every
+            field lives at cell centres; for C-grid datasets velocity
+            fields live on their respective faces (see :attr:`Field.stagger`).
+        grid: Optional :class:`Grid` metadata describing the centre
+            coordinates and stagger type of the underlying ocean grid.
+            ``None`` (default) keeps the legacy A-grid path unchanged.
     """
 
     fields: dict[str, Field]
+    grid: Grid | None = None
 
     def __getitem__(self, name: str) -> Field:
         """Return the :class:`Field` registered under ``name``.
