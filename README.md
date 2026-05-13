@@ -8,11 +8,14 @@
 
 ## Project Status
 
-**v0.1.0 — fourth iteration.** Core functionality implemented and tested (89 tests):
+**v0.1.0 — fifth iteration.** Core functionality implemented and tested (183 tests):
 
-- Bilinear interpolation of rectilinear A-grid forcing fields, with neighbourhood extraction
+- Bilinear interpolation of rectilinear forcing fields, with neighbourhood extraction
+- A-grid and NEMO-convention Arakawa C-grid forcing layouts (`Dataset.from_arrays_cgrid` / `from_xarray_cgrid`)
+- Coastal robustness on A-grid: NaN-inferred land masks, inverse-distance partial-cell bilinear, and an opt-in partial-slip scheme via `Dataset.velocity_interp`
 - Unified `solve()` function — ODE/SDE mode selected by caller (no introspection)
-- Euler and Heun solvers; SDE term receives noise vector `z` directly for full flexibility
+- Euler, Heun and RK4 solvers; SDE term receives noise vector `z` directly for full flexibility
+- Forward or backwards-in-time integration (pass an increasing or decreasing `ts`)
 - Geographic unit conversions (metres ↔ degrees)
 - Along-trajectory metrics with optional ensemble (vmap) mode
 - xarray (zarr/netCDF) dataset loading; also `Dataset.from_arrays` for plain numpy/JAX arrays
@@ -120,6 +123,102 @@ u_data = np.ones((5, 100, 100), dtype=np.float32)
 dataset = Dataset.from_arrays({"u": u_data}, t=t, lat=lat, lon=lon)
 ```
 
+### Loading C-grid forcing (NEMO convention)
+
+For data on an Arakawa C-grid, U lives on the east faces of the centre cells
+(shape `(time, nlat, nlon - 1)`) and V on the north faces (shape
+`(time, nlat - 1, nlon)`). `from_arrays_cgrid` auto-derives the staggered
+coordinates as half-cell shifts of the centre grid:
+
+```python
+from molisanax import Dataset
+
+dataset = Dataset.from_arrays_cgrid(
+    t, center_lat, center_lon,
+    u_values,                       # (T, nlat, nlon - 1)  on east faces
+    v_values,                       # (T, nlat - 1, nlon)  on north faces
+    tracers={"sst": sst_values},    # optional, at cell centres (T, nlat, nlon)
+)
+# dataset["u"].stagger == "u_face"
+# dataset["v"].stagger == "v_face"
+# dataset.grid.stagger_type == "C"
+```
+
+The same `term` you wrote for A-grid forcing works unchanged — each `Field`
+stores its own (already-shifted) coordinates, so `Field.interp` applies the
+correct bilinear-on-shifted-coords sample at the particle position.
+
+xarray analogue:
+
+```python
+dataset = Dataset.from_xarray_cgrid(
+    ds,
+    u_name="uo", v_name="vo",
+    coordinates={"time": "time", "lat": "lat", "lon": "lon"},  # centre coords
+    tracers={"sst": "thetao"},
+)
+```
+
+### Coastal forcing
+
+Real ocean forcing has land. By default the loaders detect land cells
+automatically:
+
+```python
+# u_data has NaN at every land cell (CMEMS / CF convention)
+dataset = Dataset.from_arrays({"u": u_data, "v": v_data}, t=t, lat=lat, lon=lon)
+# NaN was replaced with 0 in the stored values; a 2-D bool mask
+# was inferred from the NaN locations and attached to each Field:
+# dataset["u"].mask.shape == (nlat, nlon)
+```
+
+If your data marks land with zeros (NEMO convention) or a custom flag,
+pass an explicit mask instead:
+
+```python
+land_mask = (raw_bathy == 0)               # True where land
+dataset = Dataset.from_arrays(
+    {"u": u_data, "v": v_data}, t=t, lat=lat, lon=lon,
+    masks={"u": land_mask, "v": land_mask},
+)
+```
+
+The mask is consumed by `Field.interp` to switch from naive bilinear to
+**inverse-distance partial-cell weighting** whenever a cell straddles
+the coast: land corners are dropped and the remaining ocean corners are
+weighted by `1 / d²` from the query point. Fully land-bound cells
+return `0`. This eliminates the "stuck particle" artefact that plagues
+naive bilinear interpolation on A-grid coastal data — particles
+released near a coast slide along it at the correct ocean velocity
+instead of stalling.
+
+For richer wall-physics control, use `Dataset.velocity_interp` to
+interpolate `(U, V)` jointly with an opt-in partial-slip correction:
+
+```python
+def my_term(t, y, args):
+    dataset = args
+    vel = dataset.velocity_interp(t, y[0], y[1], scheme="partialslip")
+    return meters_to_degrees(vel, y[0])   # vel is [v, u] = [dlat/dt, dlon/dt]
+```
+
+`scheme="default"` (the default) composes per-field `Field.interp`
+(inverse-distance when a mask is present). `scheme="partialslip"`
+applies a tunable wall-slip correction near fully-land edges:
+`U` near a latitudinal coast is rescaled by `(slip_a + slip_b * wl)`,
+and `V` near a longitudinal coast by `(slip_a + slip_b * wj)`. The
+default `slip_a = slip_b = 0.5` gives a half-slip wall; `slip_a = 1,
+slip_b = 0` recovers full free-slip. Partial-slip is A-grid only —
+calling it on a C-grid dataset raises `NotImplementedError`.
+
+C-grid forcing handles coasts correctly without any mask, **provided
+U and V at land-adjacent faces are exactly zero** (the NEMO output
+convention): the face-normal velocity then vanishes at the coast by
+construction.
+
+All three coastal paths (inverse-distance, partial-slip, naive
+bilinear) are gradient-safe under `jax.grad` and `jax.jvp`.
+
 ### Neighbourhood extraction
 
 ```python
@@ -140,6 +239,17 @@ from molisanax import meters_to_degrees, degrees_to_meters
 disp_m = jnp.array([1000.0, 500.0])  # [north, east] metres
 lat_ref = jnp.array(45.0)
 disp_deg = meters_to_degrees(disp_m, lat_ref)   # [dlat, dlon] degrees
+```
+
+### Backwards-in-time integration
+
+Pass a strictly decreasing `ts` to integrate backwards. All solvers (`Euler`, `Heun`, `RK4`) handle this transparently because `dt = ts[1] - ts[0]` becomes negative:
+
+```python
+y0_end = jnp.array([48.0, -4.0])
+ts_bwd = jnp.linspace(86400.0 * 5, 0.0, 121)   # 5 days, backwards
+backtrack = solve(my_term, dataset, y0_end, ts_bwd, RK4())
+# backtrack[-1] is the source position 5 days earlier.
 ```
 
 ### Differentiability

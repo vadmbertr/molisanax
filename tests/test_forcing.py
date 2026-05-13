@@ -6,7 +6,9 @@ import numpy as np
 import pytest
 import xarray as xr
 
+from molisanax import Heun, solve
 from molisanax.forcing import Dataset, Field
+from molisanax.grid import Grid
 
 
 def make_synthetic_ds():
@@ -246,6 +248,35 @@ class TestDatasetFromArrays:
         v = dataset["u"].interp(jnp.array(0.0), jnp.array(0.0), jnp.array(315.0))
         assert float(v) == pytest.approx(1.5)
 
+    def test_from_arrays_accepts_datetime64(self):
+        """Passing a numpy datetime64 time array to from_arrays auto-converts to seconds."""
+        t_dt = np.array(["2020-01-01", "2020-01-02", "2020-01-03", "2020-01-04"],
+                        dtype="datetime64[D]")
+        _, lat, lon = self._coords()
+        u = np.ones((4, 4, 4), dtype=np.float32)
+        dataset = Dataset.from_arrays({"u": u}, t=t_dt, lat=lat, lon=lon)
+        expected = t_dt.astype("datetime64[s]").astype(np.int64)
+        assert jnp.allclose(
+            dataset["u"].t_coords,
+            jnp.asarray(expected, dtype=dataset["u"].t_coords.dtype),
+        )
+
+    def test_from_arrays_datetime64_matches_from_xarray(self):
+        """from_arrays with datetime64 and from_xarray must yield identical t_coords."""
+        ds = make_synthetic_ds()
+        ds_dataset = Dataset.from_xarray(
+            ds,
+            fields={"u": "u"},
+            coordinates={"time": "time", "lat": "lat", "lon": "lon"},
+        )
+        arr_dataset = Dataset.from_arrays(
+            {"u": ds["u"].values},
+            t=ds["time"].values,  # datetime64[D], passed in raw
+            lat=ds["lat"].values,
+            lon=ds["lon"].values,
+        )
+        assert jnp.allclose(ds_dataset["u"].t_coords, arr_dataset["u"].t_coords)
+
     def test_from_arrays_and_from_xarray_agree(self):
         """from_arrays and from_xarray must produce identical field values."""
         ds = make_synthetic_ds()
@@ -262,3 +293,184 @@ class TestDatasetFromArrays:
             lon=ds["lon"].values,
         )
         assert jnp.allclose(ds_dataset["u"].values, arr_dataset["u"].values)
+
+
+class TestDatasetCGrid:
+    """NEMO-convention Arakawa C-grid loaders and round-trip behaviour."""
+
+    def _cgrid_inputs(self, nlat=6, nlon=8, nt=3):
+        t   = np.linspace(0.0, (nt - 1) * 3600.0, nt)
+        lat = np.linspace(-2.5, 2.5, nlat)
+        lon = np.linspace(10.0, 17.0, nlon)
+        u = np.ones((nt, nlat, nlon - 1), dtype=np.float32)
+        v = np.zeros((nt, nlat - 1, nlon), dtype=np.float32)
+        return t, lat, lon, u, v
+
+    def test_builds_u_v_with_correct_stagger(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v)
+        assert ds["u"].stagger == "u_face"
+        assert ds["v"].stagger == "v_face"
+        assert ds["u"].values.shape == u.shape
+        assert ds["v"].values.shape == v.shape
+
+    def test_grid_metadata_is_c_grid(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v)
+        assert isinstance(ds.grid, Grid)
+        assert ds.grid.stagger_type == "C"
+        assert ds.grid.grid_type == "rectilinear"
+
+    def test_auto_derived_coords_match_grid_helpers(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v)
+        u_lat_expected, u_lon_expected = ds.grid.u_face_coords()
+        v_lat_expected, v_lon_expected = ds.grid.v_face_coords()
+        assert jnp.allclose(ds["u"].lat_coords, u_lat_expected)
+        assert jnp.allclose(ds["u"].lon_coords, u_lon_expected)
+        assert jnp.allclose(ds["v"].lat_coords, v_lat_expected)
+        assert jnp.allclose(ds["v"].lon_coords, v_lon_expected)
+
+    def test_u_lon_shifted_half_cell_east(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v)
+        dlon = float(lon[1] - lon[0])
+        assert jnp.allclose(ds["u"].lon_coords, jnp.asarray(lon[:-1] + 0.5 * dlon))
+
+    def test_v_lat_shifted_half_cell_north(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v)
+        dlat = float(lat[1] - lat[0])
+        assert jnp.allclose(ds["v"].lat_coords, jnp.asarray(lat[:-1] + 0.5 * dlat))
+
+    def test_explicit_staggered_coords_override_autoderive(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        custom_u_lon = jnp.asarray(lon[:-1] + 0.7)  # arbitrary, not half-cell
+        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v, u_lon=custom_u_lon)
+        assert jnp.allclose(ds["u"].lon_coords, custom_u_lon)
+
+    def test_tracers_attached_at_centre(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        sst = np.full((3, 6, 8), 15.0, dtype=np.float32)
+        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v, tracers={"sst": sst})
+        assert ds["sst"].stagger == "center"
+        assert ds["sst"].values.shape == (3, 6, 8)
+        assert jnp.allclose(ds["sst"].lat_coords, jnp.asarray(lat))
+        assert jnp.allclose(ds["sst"].lon_coords, jnp.asarray(lon))
+
+    def test_rejects_wrong_u_shape(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        u_wrong = np.ones((3, 6, 8), dtype=np.float32)  # nlon instead of nlon-1
+        with pytest.raises(ValueError, match="u_values"):
+            Dataset.from_arrays_cgrid(t, lat, lon, u_wrong, v)
+
+    def test_rejects_wrong_v_shape(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        v_wrong = np.zeros((3, 6, 8), dtype=np.float32)  # nlat instead of nlat-1
+        with pytest.raises(ValueError, match="v_values"):
+            Dataset.from_arrays_cgrid(t, lat, lon, u, v_wrong)
+
+    def test_rejects_wrong_tracer_shape(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        bad = np.zeros((3, 5, 8), dtype=np.float32)
+        with pytest.raises(ValueError, match="tracers"):
+            Dataset.from_arrays_cgrid(t, lat, lon, u, v, tracers={"sst": bad})
+
+    def test_from_xarray_cgrid_matches_from_arrays_cgrid(self):
+        t = np.array(["2020-01-01", "2020-01-02", "2020-01-03"], dtype="datetime64[D]")
+        lat = np.linspace(-2.0, 2.0, 5)
+        lon = np.linspace(0.0, 6.0, 7)
+        u_data = np.full((3, 5, 6), 0.1, dtype=np.float32)
+        v_data = np.full((3, 4, 7), 0.2, dtype=np.float32)
+        ds_xr = xr.Dataset(
+            {
+                "uo": (["time", "lat", "lon_u"], u_data),
+                "vo": (["time", "lat_v", "lon"], v_data),
+            },
+            coords={
+                "time": t, "lat": lat, "lon": lon,
+                "lon_u": lon[:-1] + 0.5 * (lon[1] - lon[0]),
+                "lat_v": lat[:-1] + 0.5 * (lat[1] - lat[0]),
+            },
+        )
+        from_xr = Dataset.from_xarray_cgrid(
+            ds_xr,
+            u_name="uo", v_name="vo",
+            coordinates={"time": "time", "lat": "lat", "lon": "lon"},
+        )
+        from_arr = Dataset.from_arrays_cgrid(t, lat, lon, u_data, v_data)
+        assert jnp.allclose(from_xr["u"].values, from_arr["u"].values)
+        assert jnp.allclose(from_xr["v"].values, from_arr["v"].values)
+        assert jnp.allclose(from_xr["u"].lon_coords, from_arr["u"].lon_coords)
+        assert jnp.allclose(from_xr["v"].lat_coords, from_arr["v"].lat_coords)
+
+    def test_from_xarray_cgrid_with_explicit_staggered_coords(self):
+        t = np.linspace(0.0, 7200.0, 3)
+        lat = np.linspace(0.0, 4.0, 5)
+        lon = np.linspace(0.0, 6.0, 7)
+        u_data = np.zeros((3, 5, 6), dtype=np.float32)
+        v_data = np.zeros((3, 4, 7), dtype=np.float32)
+        explicit_u_lon = lon[:-1] + 0.5
+        ds_xr = xr.Dataset(
+            {
+                "uo": (["time", "lat", "lon_u"], u_data),
+                "vo": (["time", "lat_v", "lon"], v_data),
+            },
+            coords={
+                "time": t, "lat": lat, "lon": lon,
+                "lon_u": explicit_u_lon,
+                "lat_v": lat[:-1] + 0.5 * (lat[1] - lat[0]),
+            },
+        )
+        ds = Dataset.from_xarray_cgrid(
+            ds_xr,
+            u_name="uo", v_name="vo",
+            coordinates={"time": "time", "lat": "lat", "lon": "lon"},
+            staggered_coordinates={"u_lon": "lon_u"},
+        )
+        assert jnp.allclose(ds["u"].lon_coords, jnp.asarray(explicit_u_lon))
+
+    def test_analytic_trajectory_linear_velocity(self):
+        """U(lon)=α·lon, V(lat)=β·lat on a C-grid → trajectory grows
+        exponentially: lon(t)=lon0·exp(αt), lat(t)=lat0·exp(βt).
+        Bilinear-on-shifted-coords is exact for linear fields, so the
+        only error left is the Heun integrator's O(h²)."""
+        alpha = 1e-5
+        beta  = 1e-5
+        T = 5e4  # α·T = β·T = 0.5 → endpoint stays inside grid bounds
+        nlat, nlon = 21, 21
+        lat = np.linspace(0.5, 4.5, nlat).astype(np.float32)
+        lon = np.linspace(0.5, 4.5, nlon).astype(np.float32)
+        dlat = float(lat[1] - lat[0])
+        dlon = float(lon[1] - lon[0])
+        u_lon = lon[:-1] + 0.5 * dlon
+        v_lat = lat[:-1] + 0.5 * dlat
+        nt = 2
+        t = np.linspace(0.0, 2 * T, nt).astype(np.float32)
+
+        # U depends only on lon, V only on lat → broadcast across lat/time.
+        u_arr = np.broadcast_to(
+            alpha * u_lon[None, None, :], (nt, nlat, nlon - 1),
+        ).astype(np.float32)
+        v_arr = np.broadcast_to(
+            beta * v_lat[None, :, None], (nt, nlat - 1, nlon),
+        ).astype(np.float32)
+
+        dataset = Dataset.from_arrays_cgrid(t, lat, lon, u_arr, v_arr)
+
+        # Treat U/V as degrees/second directly so the test isolates the
+        # C-grid interpolation + solver from the meters_to_degrees conversion.
+        def term(t_, y, args):
+            ds = args
+            u = ds["u"].interp(t_, y[0], y[1])
+            v = ds["v"].interp(t_, y[0], y[1])
+            return jnp.array([v, u])  # [dlat/dt, dlon/dt]
+
+        ts = jnp.linspace(0.0, T, 501)
+        y0 = jnp.array([2.0, 2.0], dtype=jnp.float32)
+        traj = solve(term, dataset, y0, ts, solver=Heun())
+
+        lat_final = float(traj[-1, 0])
+        lon_final = float(traj[-1, 1])
+        assert lat_final == pytest.approx(2.0 * float(np.exp(beta  * T)), rel=1e-3)
+        assert lon_final == pytest.approx(2.0 * float(np.exp(alpha * T)), rel=1e-3)
