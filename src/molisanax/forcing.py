@@ -112,11 +112,14 @@ class Field(eqx.Module):
             Interpolated scalar value at the query point. Outside the grid the
             interpolation extrapolates linearly (clamping to grid boundaries
             beyond one cell). When ``lon_period`` is set, longitude wraps
-            instead of extrapolating.
+            instead of extrapolating. When ``self.mask`` is set, coastal
+            cells use inverse-distance partial-cell weighting and fully
+            land-bound cells return ``0`` (see
+            :func:`molisanax.interpolation.bilinear_interp_2d`).
         """
         return spatiotemporal_interp(
             self.values, self.t_coords, self.lat_coords, self.lon_coords,
-            t, lat, lon, lon_period=self.lon_period,
+            t, lat, lon, lon_period=self.lon_period, mask=self.mask,
         )
 
     def neighborhood(

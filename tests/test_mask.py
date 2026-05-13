@@ -285,3 +285,250 @@ def test_interp_unchanged_when_mask_none():
         f_direct.interp(jnp.asarray(1800.0), jnp.asarray(2.3), jnp.asarray(3.1))
     )
     assert val == pytest.approx(val_direct, abs=1e-6)
+
+
+class TestMaskedBilinear:
+    """``Field.interp`` with a mask present: invdist on coastal cells,
+    zero on fully-land cells, bilinear-identical when all four corners are
+    ocean."""
+
+    def _field(self, values: np.ndarray, mask: np.ndarray) -> Field:
+        nlat, nlon = values.shape[-2:]
+        return Field(
+            values=jnp.asarray(values, dtype=jnp.float32),
+            t_coords=jnp.asarray([0.0, 1.0], dtype=jnp.float32),
+            lat_coords=jnp.linspace(0.0, float(nlat - 1), nlat, dtype=jnp.float32),
+            lon_coords=jnp.linspace(0.0, float(nlon - 1), nlon, dtype=jnp.float32),
+            mask=jnp.asarray(mask, dtype=jnp.bool_),
+        )
+
+    def test_all_ocean_cell_matches_naive(self):
+        """When all four corners are ocean, masked interp must match
+        unmasked bilinear bit-for-bit (modulo float32)."""
+        values = np.array(
+            [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]] * 2,
+            dtype=np.float32,
+        )
+        mask_all_ocean = np.zeros((3, 3), dtype=bool)
+        f_masked = self._field(values, mask_all_ocean)
+        f_naive = Field(
+            values=jnp.asarray(values),
+            t_coords=jnp.asarray([0.0, 1.0], dtype=jnp.float32),
+            lat_coords=jnp.linspace(0.0, 2.0, 3, dtype=jnp.float32),
+            lon_coords=jnp.linspace(0.0, 2.0, 3, dtype=jnp.float32),
+        )
+        for lat_q, lon_q in [(0.3, 0.7), (1.5, 1.5), (1.9, 0.1)]:
+            v_m = float(f_masked.interp(jnp.asarray(0.5), jnp.asarray(lat_q), jnp.asarray(lon_q)))
+            v_n = float(f_naive.interp(jnp.asarray(0.5), jnp.asarray(lat_q), jnp.asarray(lon_q)))
+            assert v_m == pytest.approx(v_n, abs=1e-6)
+
+    def test_all_land_cell_returns_zero(self):
+        """A query inside a 2×2 sub-cell where all four corners are land
+        must return exactly 0 (no NaN, no extrapolation)."""
+        values = np.ones((2, 3, 3), dtype=np.float32) * 5.0
+        mask = np.ones((3, 3), dtype=bool)  # everything is land
+        f = self._field(values, mask)
+        v = float(f.interp(jnp.asarray(0.5), jnp.asarray(1.5), jnp.asarray(1.5)))
+        assert v == 0.0
+
+    def test_one_land_corner_uses_only_ocean(self):
+        """One land corner: result should equal an inverse-distance weighted
+        average of the three ocean corners' values, NOT include the land
+        corner's stored value at all."""
+        # Layout (lat × lon, integer indices):
+        #   (0,0)=ocean=10   (0,1)=ocean=20
+        #   (1,0)=LAND=999   (1,1)=ocean=40
+        slab = np.array([[10.0, 20.0], [999.0, 40.0]], dtype=np.float32)
+        values = np.stack([slab, slab])
+        mask = np.array([[False, False], [True, False]], dtype=bool)
+        f = self._field(values, mask)
+
+        # Query at the centre of the cell: equal cell-coord distance to each
+        # of the four corners (wl=wj=0.5). Drop (1,0); average the other
+        # three with equal inverse-distance weight → (10+20+40)/3 = 23.33...
+        v_centre = float(f.interp(jnp.asarray(0.5), jnp.asarray(0.5), jnp.asarray(0.5)))
+        assert v_centre == pytest.approx((10.0 + 20.0 + 40.0) / 3.0, rel=1e-5)
+        # Crucially, 999 was NOT included.
+        assert v_centre < 100.0
+
+    def test_query_at_ocean_corner_recovers_corner_value(self):
+        """A query exactly on an ocean corner of a mixed-mask cell must
+        approach that corner's value (the eps floor keeps it finite)."""
+        slab = np.array([[10.0, 20.0], [0.0, 40.0]], dtype=np.float32)
+        values = np.stack([slab, slab])
+        mask = np.array([[False, False], [True, False]], dtype=bool)
+        f = self._field(values, mask)
+        v = float(f.interp(jnp.asarray(0.0), jnp.asarray(0.0), jnp.asarray(0.0)))
+        assert v == pytest.approx(10.0, rel=1e-4)
+
+    def test_query_at_land_corner_uses_distant_ocean(self):
+        """A query at a land corner: inverse-distance weighting kicks in
+        because the eps floor prevents the would-be ∞ weight at the land
+        corner from dominating (the land corner is masked out entirely).
+        Result must be finite, no NaN."""
+        slab = np.array([[10.0, 20.0], [0.0, 40.0]], dtype=np.float32)
+        values = np.stack([slab, slab])
+        mask = np.array([[False, False], [True, False]], dtype=bool)
+        f = self._field(values, mask)
+        v = float(f.interp(jnp.asarray(0.0), jnp.asarray(1.0), jnp.asarray(0.0)))
+        assert np.isfinite(v)
+
+
+class TestMaskedInterpGradientSafety:
+    """Backward-pass safety: ``jax.grad`` through ``Field.interp`` must
+    produce no NaN at any of the tricky positions (corners, on land,
+    fully-land cell)."""
+
+    def _setup(self):
+        slab = np.array([[10.0, 20.0], [0.0, 40.0]], dtype=np.float32)
+        values = np.stack([slab, slab])
+        mask = np.array([[False, False], [True, False]], dtype=bool)
+        return Field(
+            values=jnp.asarray(values),
+            t_coords=jnp.asarray([0.0, 1.0], dtype=jnp.float32),
+            lat_coords=jnp.asarray([0.0, 1.0], dtype=jnp.float32),
+            lon_coords=jnp.asarray([0.0, 1.0], dtype=jnp.float32),
+            mask=jnp.asarray(mask),
+        )
+
+    def test_grad_finite_in_mixed_cell(self):
+        import jax
+        f = self._setup()
+        g = jax.grad(
+            lambda p: f.interp(jnp.asarray(0.5), p[0], p[1])
+        )(jnp.asarray([0.3, 0.7], dtype=jnp.float32))
+        assert jnp.all(jnp.isfinite(g))
+
+    def test_grad_finite_at_ocean_corner(self):
+        import jax
+        f = self._setup()
+        g = jax.grad(
+            lambda p: f.interp(jnp.asarray(0.5), p[0], p[1])
+        )(jnp.asarray([0.0, 0.0], dtype=jnp.float32))
+        assert jnp.all(jnp.isfinite(g))
+
+    def test_grad_finite_at_land_corner(self):
+        import jax
+        f = self._setup()
+        g = jax.grad(
+            lambda p: f.interp(jnp.asarray(0.5), p[0], p[1])
+        )(jnp.asarray([1.0, 0.0], dtype=jnp.float32))
+        assert jnp.all(jnp.isfinite(g))
+
+    def test_grad_finite_in_all_land_cell(self):
+        import jax
+        values = np.ones((2, 2, 2), dtype=np.float32) * 5.0
+        mask = np.ones((2, 2), dtype=bool)
+        f = Field(
+            values=jnp.asarray(values),
+            t_coords=jnp.asarray([0.0, 1.0], dtype=jnp.float32),
+            lat_coords=jnp.asarray([0.0, 1.0], dtype=jnp.float32),
+            lon_coords=jnp.asarray([0.0, 1.0], dtype=jnp.float32),
+            mask=jnp.asarray(mask),
+        )
+        g = jax.grad(
+            lambda p: f.interp(jnp.asarray(0.5), p[0], p[1])
+        )(jnp.asarray([0.5, 0.5], dtype=jnp.float32))
+        assert jnp.all(jnp.isfinite(g))
+
+
+class TestAlongshoreJetNoStuckParticle:
+    """End-to-end coastal-robustness check: an A-grid alongshore jet must
+    advect a particle along the coast — not trap it.
+
+    Setup: lat∈[0, 4], lon∈[0, 9]. The first row (lat[0]) is LAND; the
+    rest is ocean. U is a constant 0.1 deg/s eastward; V is zero. Without
+    a mask, the bilinear interp pulls the particle east-velocity towards
+    0 as the particle gets near lat=0, because the land row carries zero
+    U. With the mask + invdist, the land row is dropped and the particle
+    keeps the full ocean velocity.
+    """
+
+    def _dataset(self, with_mask: bool):
+        from molisanax import Dataset
+        nlat, nlon, nt = 5, 10, 2
+        lat = np.linspace(0.0, 4.0, nlat).astype(np.float32)
+        lon = np.linspace(0.0, 9.0, nlon).astype(np.float32)
+        t = np.array([0.0, 1e6], dtype=np.float32)
+        u = np.full((nt, nlat, nlon), 0.1, dtype=np.float32)
+        u[:, 0, :] = 0.0  # land row carries zero velocity
+        v = np.zeros((nt, nlat, nlon), dtype=np.float32)
+        masks = None
+        if with_mask:
+            m = np.zeros((nlat, nlon), dtype=bool)
+            m[0, :] = True
+            masks = {"u": m, "v": m}
+        return Dataset.from_arrays(
+            {"u": u, "v": v}, t=t, lat=lat, lon=lon, masks=masks,
+        )
+
+    def _term(self):
+        # Treat U/V as deg/s directly so the test isolates the masking
+        # logic from the meters_to_degrees conversion.
+        def term(t, y, args):
+            ds = args
+            u = ds["u"].interp(t, y[0], y[1])
+            v = ds["v"].interp(t, y[0], y[1])
+            return jnp.array([v, u])
+        return term
+
+    def test_unmasked_particle_gets_stuck_near_coast(self):
+        from molisanax import Heun, solve
+        ds = self._dataset(with_mask=False)
+        ts = jnp.linspace(0.0, 5.0, 11)  # 5 seconds
+        y0 = jnp.array([0.1, 0.5], dtype=jnp.float32)  # just above coast
+        traj = solve(self._term(), ds, y0, ts, solver=Heun())
+        # With naive bilinear, the lat=0 land row pulls U down: at lat=0.1
+        # (close to coast) U≈0.1*0.1≈0.01 deg/s, so dlon ≈ 0.05 over 5 s.
+        dlon_unmasked = float(traj[-1, 1] - traj[0, 1])
+        assert dlon_unmasked < 0.10  # well under the full 0.5 deg eastward
+
+    def test_masked_particle_slides_along_coast(self):
+        from molisanax import Heun, solve
+        ds = self._dataset(with_mask=True)
+        ts = jnp.linspace(0.0, 5.0, 11)
+        y0 = jnp.array([0.1, 0.5], dtype=jnp.float32)
+        traj = solve(self._term(), ds, y0, ts, solver=Heun())
+        # With the mask + invdist, the land row is dropped: the particle
+        # sees the ocean U=0.1 unattenuated. Over 5 s → 0.5 deg east.
+        dlon_masked = float(traj[-1, 1] - traj[0, 1])
+        assert dlon_masked == pytest.approx(0.5, rel=0.05)
+        # And lat should not drift (V=0 everywhere).
+        assert float(traj[-1, 0]) == pytest.approx(0.1, abs=1e-3)
+
+
+class TestClosedBay:
+    """A particle inside a cell entirely surrounded by land must have
+    zero velocity (not NaN) and stay put."""
+
+    def test_closed_bay_zero_velocity(self):
+        from molisanax import Heun, solve
+        from molisanax import Dataset
+        nlat, nlon, nt = 5, 5, 2
+        lat = np.linspace(0.0, 4.0, nlat).astype(np.float32)
+        lon = np.linspace(0.0, 4.0, nlon).astype(np.float32)
+        t = np.array([0.0, 1e6], dtype=np.float32)
+        u = np.full((nt, nlat, nlon), 0.05, dtype=np.float32)
+        v = np.full((nt, nlat, nlon), 0.05, dtype=np.float32)
+        # The 2×2 block around (lat,lon)=(2,2) is all land.
+        m = np.zeros((nlat, nlon), dtype=bool)
+        m[1:4, 1:4] = True
+        ds = Dataset.from_arrays(
+            {"u": u, "v": v}, t=t, lat=lat, lon=lon, masks={"u": m, "v": m},
+        )
+
+        def term(t, y, args):
+            ds_ = args
+            return jnp.array(
+                [ds_["v"].interp(t, y[0], y[1]),
+                 ds_["u"].interp(t, y[0], y[1])]
+            )
+
+        ts = jnp.linspace(0.0, 100.0, 11)
+        y0 = jnp.array([2.0, 2.0], dtype=jnp.float32)  # dead centre of the bay
+        traj = solve(term, ds, y0, ts, solver=Heun())
+        # Final position equals start (zero velocity all along).
+        assert float(traj[-1, 0]) == pytest.approx(2.0, abs=1e-5)
+        assert float(traj[-1, 1]) == pytest.approx(2.0, abs=1e-5)
+        # And no NaN anywhere.
+        assert bool(jnp.all(jnp.isfinite(traj))) is True

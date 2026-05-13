@@ -2,7 +2,8 @@
 
 import jax.numpy as jnp
 
-from ._types import Array, Float, Int
+from ._safe_math import safe_divide
+from ._types import Array, Bool, Float, Int
 
 __all__ = [
     "linear_interp_1d",
@@ -78,6 +79,7 @@ def bilinear_interp_2d(
     lat: Float[Array, ""],
     lon: Float[Array, ""],
     lon_period: float | None = None,
+    mask: Bool[Array, "lat lon"] | None = None,
 ) -> Float[Array, ""]:
     """Bilinearly interpolate a 2-D field on an equally-spaced rectilinear grid.
 
@@ -93,6 +95,20 @@ def bilinear_interp_2d(
             ``lon_coords[-1] + dlon`` is identified with ``lon_coords[0]``.
             ``None`` (default) reproduces the non-wrapping behaviour with
             linear extrapolation past the boundary.
+        mask: Optional 2-D boolean land mask, same shape as ``values``.
+            ``True`` marks a land cell. Behaviour by mixed-corner count:
+
+            * All four corners ocean → standard bilinear (bit-exact identical
+              to the ``mask=None`` path).
+            * Mixed corners → inverse-distance partial-cell weighting on the
+              ocean corners in normalised cell coordinates
+              (``d² = α² + β² + ε`` where ``α``, ``β`` are the fractional
+              distances along the cell axes); land corners are dropped.
+            * All four corners land → returns ``0`` (zero velocity for
+              fully-grounded cells).
+
+            The ``ε`` floor and :func:`safe_divide` keep both forward and
+            backward passes finite for queries on or near a corner.
 
     Returns:
         Interpolated scalar value at ``(lat, lon)``.
@@ -105,12 +121,52 @@ def bilinear_interp_2d(
         nlon = lon_coords.shape[0]
         jl, wj = _periodic_index_and_weight(lon_coords, lon, lon_period)
         jl1 = (jl + 1) % nlon
-    return (
-        values[il,     jl ] * (1.0 - wl) * (1.0 - wj)
-        + values[il + 1, jl ] * wl         * (1.0 - wj)
-        + values[il,     jl1] * (1.0 - wl) * wj
-        + values[il + 1, jl1] * wl         * wj
+
+    v00 = values[il,     jl ]
+    v10 = values[il + 1, jl ]
+    v01 = values[il,     jl1]
+    v11 = values[il + 1, jl1]
+    naive = (
+        v00 * (1.0 - wl) * (1.0 - wj)
+        + v10 * wl         * (1.0 - wj)
+        + v01 * (1.0 - wl) * wj
+        + v11 * wl         * wj
     )
+    if mask is None:
+        return naive
+
+    o00 = ~mask[il,     jl ]
+    o10 = ~mask[il + 1, jl ]
+    o01 = ~mask[il,     jl1]
+    o11 = ~mask[il + 1, jl1]
+    n_ocean = (
+        o00.astype(jnp.int32) + o10.astype(jnp.int32)
+        + o01.astype(jnp.int32) + o11.astype(jnp.int32)
+    )
+
+    eps = jnp.asarray(1e-7, dtype=naive.dtype)
+    wl_lo = wl
+    wl_hi = 1.0 - wl
+    wj_lo = wj
+    wj_hi = 1.0 - wj
+    d00 = wl_lo * wl_lo + wj_lo * wj_lo + eps
+    d10 = wl_hi * wl_hi + wj_lo * wj_lo + eps
+    d01 = wl_lo * wl_lo + wj_hi * wj_hi + eps
+    d11 = wl_hi * wl_hi + wj_hi * wj_hi + eps
+
+    one = jnp.asarray(1.0, dtype=naive.dtype)
+    zero = jnp.asarray(0.0, dtype=naive.dtype)
+    iw00 = jnp.where(o00, one / d00, zero)
+    iw10 = jnp.where(o10, one / d10, zero)
+    iw01 = jnp.where(o01, one / d01, zero)
+    iw11 = jnp.where(o11, one / d11, zero)
+    weighted = v00 * iw00 + v10 * iw10 + v01 * iw01 + v11 * iw11
+    total = iw00 + iw10 + iw01 + iw11
+    invdist = safe_divide(weighted, total)
+
+    all_ocean = n_ocean == 4
+    all_land  = n_ocean == 0
+    return jnp.where(all_ocean, naive, jnp.where(all_land, zero, invdist))
 
 
 def spatiotemporal_interp(
@@ -122,6 +178,7 @@ def spatiotemporal_interp(
     lat: Float[Array, ""],
     lon: Float[Array, ""],
     lon_period: float | None = None,
+    mask: Bool[Array, "lat lon"] | None = None,
 ) -> Float[Array, ""]:
     """Trilinearly interpolate a field in time and space on an A-grid.
 
@@ -138,15 +195,19 @@ def spatiotemporal_interp(
         lon: Query longitude in degrees.
         lon_period: If given, treat the longitude axis as periodic with this
             period (see :func:`bilinear_interp_2d`).
+        mask: Optional 2-D land mask shared across time (see
+            :func:`bilinear_interp_2d`).
 
     Returns:
         Interpolated scalar value at ``(t, lat, lon)``.
     """
     it, wt = _index_and_weight(t_coords, t)
     v0 = bilinear_interp_2d(
-        values[it],     lat_coords, lon_coords, lat, lon, lon_period=lon_period,
+        values[it],     lat_coords, lon_coords, lat, lon,
+        lon_period=lon_period, mask=mask,
     )
     v1 = bilinear_interp_2d(
-        values[it + 1], lat_coords, lon_coords, lat, lon, lon_period=lon_period,
+        values[it + 1], lat_coords, lon_coords, lat, lon,
+        lon_period=lon_period, mask=mask,
     )
     return v0 * (1.0 - wt) + v1 * wt
