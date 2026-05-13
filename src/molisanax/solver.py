@@ -1,4 +1,4 @@
-"""ODE and SDE solvers: Euler and Heun with a unified lax.scan integration loop.
+"""ODE and SDE solvers: Euler, Heun and RK4 with a unified lax.scan integration loop.
 
 Term API
 --------
@@ -13,6 +13,10 @@ SDE term: ``f(t, y, args, z) -> Float[Array, "2"]``
 Mode detection is based on the call site: passing any of ``key``, ``noise``,
 or ``n_noise`` to ``solve()`` selects SDE mode.  If none are passed, ODE mode
 is assumed and the term is called without a noise argument.
+
+Backwards-in-time integration is supported transparently: pass a strictly
+decreasing ``ts`` (so ``dt = ts[1] - ts[0]`` is negative) and the same solvers
+step backwards.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ __all__ = [
     "AbstractSolver",
     "Euler",
     "Heun",
+    "RK4",
     "solve",
 ]
 
@@ -207,6 +212,76 @@ class Heun(AbstractSolver):
         k1 = term(t, y, args, z)
         k2 = term(t + dt, y + k1 * dt, args, z)
         return y + 0.5 * (k1 + k2) * dt
+
+
+class RK4(AbstractSolver):
+    """Classical fourth-order Runge–Kutta solver (four stages, fixed-step).
+
+    Convergence order 4 in the ODE case. For SDEs, the same noise sample
+    ``z`` is reused in all four stages, yielding a Stratonovich-consistent
+    scheme whose strong order of convergence is limited by the noise
+    structure (typically order 0.5 for general multiplicative noise; higher
+    for additive noise).
+    """
+
+    def ode_step(
+        self,
+        term: Callable,
+        t: Float[Array, ""],
+        y: Float[Array, "2"],
+        dt: Float[Array, ""],
+        args: PyTree,
+    ) -> Float[Array, "2"]:
+        """One classical RK4 step.
+
+        Args:
+            term: ODE drift callable.
+            t: Current time, in seconds.
+            y: Current state ``[lat, lon]`` in degrees.
+            dt: Step size in seconds.
+            args: Arbitrary pytree forwarded to ``term``.
+
+        Returns:
+            Updated state after one RK4 step.
+        """
+        half = dt * 0.5
+        k1 = term(t, y, args)
+        k2 = term(t + half, y + k1 * half, args)
+        k3 = term(t + half, y + k2 * half, args)
+        k4 = term(t + dt,   y + k3 * dt,   args)
+        return y + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+    def sde_step(
+        self,
+        term: Callable,
+        t: Float[Array, ""],
+        y: Float[Array, "2"],
+        dt: Float[Array, ""],
+        args: PyTree,
+        z: Float[Array, " n_noise"],
+    ) -> Float[Array, "2"]:
+        """One stochastic RK4 step (Stratonovich-consistent, single noise sample).
+
+        The same noise sample ``z`` is reused in all four stage evaluations.
+
+        Args:
+            term: SDE dynamics callable returning the full velocity for the
+                given noise sample ``z``.
+            t: Current time, in seconds.
+            y: Current state ``[lat, lon]`` in degrees.
+            dt: Step size in seconds.
+            args: Arbitrary pytree forwarded to ``term``.
+            z: Pre-sampled noise vector of shape ``(n_noise,)``.
+
+        Returns:
+            Updated state after one stochastic RK4 step.
+        """
+        half = dt * 0.5
+        k1 = term(t, y, args, z)
+        k2 = term(t + half, y + k1 * half, args, z)
+        k3 = term(t + half, y + k2 * half, args, z)
+        k4 = term(t + dt,   y + k3 * dt,   args, z)
+        return y + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 
 
 def _run_ode(

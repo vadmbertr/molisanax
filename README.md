@@ -12,7 +12,8 @@
 
 - Bilinear interpolation of rectilinear A-grid forcing fields, with neighbourhood extraction
 - Unified `solve()` function — ODE/SDE mode selected by caller (no introspection)
-- Euler and Heun solvers; SDE term receives noise vector `z` directly for full flexibility
+- Euler, Heun and RK4 solvers; SDE term receives noise vector `z` directly for full flexibility
+- Forward or backwards-in-time integration (pass an increasing or decreasing `ts`)
 - Geographic unit conversions (metres ↔ degrees)
 - Along-trajectory metrics with optional ensemble (vmap) mode
 - xarray (zarr/netCDF) dataset loading; also `Dataset.from_arrays` for plain numpy/JAX arrays
@@ -140,6 +141,17 @@ from molisanax import meters_to_degrees, degrees_to_meters
 disp_m = jnp.array([1000.0, 500.0])  # [north, east] metres
 lat_ref = jnp.array(45.0)
 disp_deg = meters_to_degrees(disp_m, lat_ref)   # [dlat, dlon] degrees
+```
+
+### Backwards-in-time integration
+
+Pass a strictly decreasing `ts` to integrate backwards. All solvers (`Euler`, `Heun`, `RK4`) handle this transparently because `dt = ts[1] - ts[0]` becomes negative:
+
+```python
+y0_end = jnp.array([48.0, -4.0])
+ts_bwd = jnp.linspace(86400.0 * 5, 0.0, 121)   # 5 days, backwards
+backtrack = solve(my_term, dataset, y0_end, ts_bwd, RK4())
+# backtrack[-1] is the source position 5 days earlier.
 ```
 
 ### Differentiability

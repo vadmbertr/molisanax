@@ -13,8 +13,8 @@
 | `_safe_math.py` | Done | `safe_sqrt`, `safe_log`, `safe_divide` — gradient-safe math utilities |
 | `geo.py` | Done | `EARTH_RADIUS=6_371_008.8 m`, `haversine`, `meters_to_degrees`, `degrees_to_meters` |
 | `interpolation.py` | Done | 1D linear, 2D bilinear, trilinear (time+space); O(1) index via closed-form floor — no searchsorted; opt-in periodic longitude via `lon_period` |
-| `forcing.py` | Done | `Field` (with `.interp` and `.neighborhood`), `Dataset.from_xarray`, `Dataset.from_arrays`; (time, lat, lon) axis order; periodic longitude via `lon_period` |
-| `solver.py` | Done | `Euler`, `Heun`; unified `solve()` — ODE/SDE detected by caller (`key`/`noise`/`n_noise`); SDE term receives `z` directly |
+| `forcing.py` | Done | `Field` (with `.interp` and `.neighborhood`), `Dataset.from_xarray`, `Dataset.from_arrays`; (time, lat, lon) axis order; periodic longitude via `lon_period`; both loaders accept NumPy `datetime64` time arrays and auto-convert to int seconds since the Unix epoch |
+| `solver.py` | Done | `Euler`, `Heun`, `RK4`; unified `solve()` — ODE/SDE detected by caller (`key`/`noise`/`n_noise`); SDE term receives `z` directly; backwards-in-time integration supported by passing a strictly decreasing `ts` |
 | `metrics.py` | Done | `separation_distance`, `normalized_separation_distance`, `liu_index`; all support `ensemble=True` |
 
 **Tests**: 104 tests, all passing (`pytest -q`).
