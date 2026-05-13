@@ -1,3 +1,3 @@
-from jaxtyping import Array, Float, Int, Key, PyTree
+from jaxtyping import Array, Bool, Float, Int, Key, PyTree
 
-__all__ = ["Array", "Float", "Int", "Key", "PyTree"]
+__all__ = ["Array", "Bool", "Float", "Int", "Key", "PyTree"]

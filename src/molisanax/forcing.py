@@ -8,7 +8,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from ._types import Array, Float
+from ._types import Array, Bool, Float
 from .grid import Grid
 from .interpolation import spatiotemporal_interp
 
@@ -77,6 +77,12 @@ class Field(eqx.Module):
             for downstream code that needs to distinguish velocity faces
             from centres; ``Field.interp`` itself is the same bilinear
             scheme regardless.
+        mask: Optional 2-D boolean land mask aligned with ``(lat, lon)``;
+            ``True`` marks a land cell, ``False`` marks ocean. Assumed
+            time-invariant (wet-and-dry is out of scope). ``None`` (default)
+            means no land logic — ``Field.interp`` is plain bilinear. When
+            a mask is present, coastal interpolation schemes (added in a
+            later iteration) consult it to drop land corners.
     """
 
     values: Float[Array, "time lat lon"]
@@ -87,6 +93,7 @@ class Field(eqx.Module):
     stagger: Literal["center", "u_face", "v_face"] = eqx.field(
         static=True, default="center"
     )
+    mask: Bool[Array, "lat lon"] | None = None
 
     def interp(
         self,
@@ -236,6 +243,7 @@ class Dataset(eqx.Module):
         lon: Array,
         dtype: DTypeLike = jnp.float32,
         lon_period: float | None = None,
+        masks: dict[str, Array] | None = None,
     ) -> Dataset:
         """Build a Dataset from numpy or JAX arrays.
 
@@ -251,6 +259,15 @@ class Dataset(eqx.Module):
             lon_period: If set (e.g. ``360.0``), all fields are constructed
                 with periodic longitude wrapping. The grid must span exactly
                 one period.
+            masks: Optional ``{field_name: 2-D bool array of shape (lat, lon)}``
+                land masks. ``True`` marks a land cell. When a field appears
+                in ``masks``, that mask is used. Otherwise a mask is inferred
+                from NaN locations in the values array (collapsed across the
+                time axis). Fields with neither user-supplied nor inferred
+                NaN entries carry ``mask=None`` — interp behaviour is then
+                bit-exact identical to the legacy mask-less path. NaN values
+                in the input are always replaced with 0 in the stored
+                ``values`` so no NaN can leak into interpolation.
 
         Returns:
             Dataset with all fields on the given grid.
@@ -259,16 +276,25 @@ class Dataset(eqx.Module):
         t_arr   = jnp.asarray(t,   dtype=dtype)
         lat_arr = jnp.asarray(lat, dtype=dtype)
         lon_arr = jnp.asarray(lon, dtype=dtype)
-        loaded = {
-            name: Field(
-                values=jnp.asarray(v, dtype=dtype),
+        nlat = int(lat_arr.shape[0])
+        nlon = int(lon_arr.shape[0])
+        masks = masks or {}
+        loaded: dict[str, Field] = {}
+        for name, v in fields.items():
+            v_arr = jnp.asarray(v, dtype=dtype)
+            clean, mask = _resolve_mask(
+                v_arr, masks.get(name),
+                expected_mask_shape=(nlat, nlon),
+                field_name=name,
+            )
+            loaded[name] = Field(
+                values=clean,
                 t_coords=t_arr,
                 lat_coords=lat_arr,
                 lon_coords=lon_arr,
                 lon_period=lon_period,
+                mask=mask,
             )
-            for name, v in fields.items()
-        }
         return Dataset(fields=loaded)
 
     @staticmethod
@@ -278,6 +304,7 @@ class Dataset(eqx.Module):
         coordinates: dict[str, str],
         dtype: DTypeLike = jnp.float32,
         lon_period: float | None = None,
+        masks: dict[str, Array] | None = None,
     ) -> Dataset:
         """Load a Dataset from an xarray Dataset (zarr or netCDF backed).
 
@@ -289,6 +316,10 @@ class Dataset(eqx.Module):
             lon_period: If set (e.g. ``360.0``), all fields are constructed
                 with periodic longitude wrapping. The grid must span exactly
                 one period.
+            masks: Optional land masks keyed by internal field name; see
+                :meth:`from_arrays` for semantics. If omitted, masks are
+                inferred from NaN — which matches the CMEMS / CF
+                ``_FillValue`` convention.
 
         Returns:
             Dataset with all fields loaded into host memory as JAX arrays.
@@ -303,6 +334,7 @@ class Dataset(eqx.Module):
             lon=ds[coordinates["lon"]].values,
             dtype=dtype,
             lon_period=lon_period,
+            masks=masks,
         )
 
     @staticmethod
@@ -320,6 +352,7 @@ class Dataset(eqx.Module):
         v_lon: Array | None = None,
         dtype: DTypeLike = jnp.float32,
         lon_period: float | None = None,
+        masks: dict[str, Array] | None = None,
     ) -> Dataset:
         """Build a Dataset on a NEMO-convention Arakawa C-grid.
 
@@ -350,6 +383,15 @@ class Dataset(eqx.Module):
                 ``lon_period``; U/V faces do not (their coordinate arrays
                 no longer span a full period, so periodic wrapping would be
                 ill-defined at first order).
+            masks: Optional land masks keyed by field name (``"u"``, ``"v"``,
+                or any tracer name). Each mask is a 2-D bool array; the
+                expected shape per field is
+                ``(nlat, nlon - 1)`` for ``"u"``,
+                ``(nlat - 1, nlon)`` for ``"v"``,
+                and ``(nlat, nlon)`` for tracers. When a field is absent
+                from ``masks``, a mask is inferred from NaN locations in
+                that field's values array. NaN values are always replaced
+                with 0 in the stored ``values``.
 
         Returns:
             Dataset with ``fields={"u": Field(stagger="u_face"),
@@ -390,26 +432,39 @@ class Dataset(eqx.Module):
         _check_cgrid_shape("v_lat", v_lat_arr.shape, (nlat - 1,))
         _check_cgrid_shape("v_lon", v_lon_arr.shape, (nlon,))
 
+        masks = masks or {}
+        u_clean, u_mask = _resolve_mask(
+            u_arr, masks.get("u"),
+            expected_mask_shape=(nlat, nlon - 1), field_name="u",
+        )
+        v_clean, v_mask = _resolve_mask(
+            v_arr, masks.get("v"),
+            expected_mask_shape=(nlat - 1, nlon), field_name="v",
+        )
         loaded: dict[str, Field] = {
             "u": Field(
-                values=u_arr, t_coords=t_arr,
+                values=u_clean, t_coords=t_arr,
                 lat_coords=u_lat_arr, lon_coords=u_lon_arr,
-                lon_period=None, stagger="u_face",
+                lon_period=None, stagger="u_face", mask=u_mask,
             ),
             "v": Field(
-                values=v_arr, t_coords=t_arr,
+                values=v_clean, t_coords=t_arr,
                 lat_coords=v_lat_arr, lon_coords=v_lon_arr,
-                lon_period=None, stagger="v_face",
+                lon_period=None, stagger="v_face", mask=v_mask,
             ),
         }
         if tracers:
             for name, arr in tracers.items():
                 a = jnp.asarray(arr, dtype=dtype)
                 _check_cgrid_shape(f"tracers[{name!r}]", a.shape, (nt, nlat, nlon))
+                tr_clean, tr_mask = _resolve_mask(
+                    a, masks.get(name),
+                    expected_mask_shape=(nlat, nlon), field_name=name,
+                )
                 loaded[name] = Field(
-                    values=a, t_coords=t_arr,
+                    values=tr_clean, t_coords=t_arr,
                     lat_coords=lat_arr, lon_coords=lon_arr,
-                    lon_period=lon_period, stagger="center",
+                    lon_period=lon_period, stagger="center", mask=tr_mask,
                 )
         return Dataset(fields=loaded, grid=grid)
 
@@ -424,6 +479,7 @@ class Dataset(eqx.Module):
         staggered_coordinates: dict[str, str] | None = None,
         dtype: DTypeLike = jnp.float32,
         lon_period: float | None = None,
+        masks: dict[str, Array] | None = None,
     ) -> Dataset:
         """Load a C-grid Dataset from an xarray Dataset.
 
@@ -448,6 +504,8 @@ class Dataset(eqx.Module):
                 auto-derived.
             dtype: JAX dtype for all arrays (default float32).
             lon_period: Forwarded to :meth:`from_arrays_cgrid`.
+            masks: Forwarded to :meth:`from_arrays_cgrid` (per-field
+                ``{"u", "v", <tracer_name>}`` keys).
 
         Returns:
             Dataset with C-grid stagger and :class:`Grid` metadata.
@@ -469,6 +527,7 @@ class Dataset(eqx.Module):
             v_lon=ds[stag["v_lon"]].values if "v_lon" in stag else None,
             dtype=dtype,
             lon_period=lon_period,
+            masks=masks,
         )
 
 
@@ -479,3 +538,48 @@ def _check_cgrid_shape(name: str, got: tuple[int, ...], expected: tuple[int, ...
             f"NEMO convention requires U at shape (time, nlat, nlon-1) and "
             f"V at shape (time, nlat-1, nlon)."
         )
+
+
+def _resolve_mask(
+    values: Float[Array, "time lat lon"],
+    user_mask: Array | None,
+    *,
+    expected_mask_shape: tuple[int, int],
+    field_name: str,
+) -> tuple[Float[Array, "time lat lon"], Bool[Array, "lat lon"] | None]:
+    """Replace NaN in ``values`` with 0 and resolve the field's land mask.
+
+    Rules (in order):
+
+    1. NaN values are always replaced with 0 in the returned values array.
+    2. If ``user_mask`` is provided, it is validated against
+       ``expected_mask_shape`` and used as-is. Time-varying (3-D) masks are
+       rejected.
+    3. Otherwise, if NaN was present in ``values``, infer a 2-D mask from
+       ``isnan(values).any(axis=0)``.
+    4. If no user mask and no NaN, return ``mask=None`` — the resulting
+       Field is bit-exact identical (PyTree structure included) to one
+       built before the mask feature was added.
+
+    Returns:
+        ``(clean_values, mask)`` where ``mask`` is either a 2-D bool array
+        or ``None``.
+    """
+    nan_locs = jnp.isnan(values)
+    clean_values = jnp.where(nan_locs, jnp.asarray(0.0, dtype=values.dtype), values)
+
+    if user_mask is not None:
+        mask = jnp.asarray(user_mask, dtype=jnp.bool_)
+        if mask.shape != expected_mask_shape:
+            raise ValueError(
+                f"masks[{field_name!r}]: expected 2-D bool array of shape "
+                f"{expected_mask_shape}, got {mask.shape}. Time-varying masks "
+                "(wet-and-dry) are not supported."
+            )
+        return clean_values, mask
+
+    if bool(nan_locs.any()):
+        inferred = nan_locs.any(axis=0)
+        return clean_values, inferred
+
+    return clean_values, None
