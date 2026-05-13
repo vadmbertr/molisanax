@@ -246,6 +246,35 @@ class TestDatasetFromArrays:
         v = dataset["u"].interp(jnp.array(0.0), jnp.array(0.0), jnp.array(315.0))
         assert float(v) == pytest.approx(1.5)
 
+    def test_from_arrays_accepts_datetime64(self):
+        """Passing a numpy datetime64 time array to from_arrays auto-converts to seconds."""
+        t_dt = np.array(["2020-01-01", "2020-01-02", "2020-01-03", "2020-01-04"],
+                        dtype="datetime64[D]")
+        _, lat, lon = self._coords()
+        u = np.ones((4, 4, 4), dtype=np.float32)
+        dataset = Dataset.from_arrays({"u": u}, t=t_dt, lat=lat, lon=lon)
+        expected = t_dt.astype("datetime64[s]").astype(np.int64)
+        assert jnp.allclose(
+            dataset["u"].t_coords,
+            jnp.asarray(expected, dtype=dataset["u"].t_coords.dtype),
+        )
+
+    def test_from_arrays_datetime64_matches_from_xarray(self):
+        """from_arrays with datetime64 and from_xarray must yield identical t_coords."""
+        ds = make_synthetic_ds()
+        ds_dataset = Dataset.from_xarray(
+            ds,
+            fields={"u": "u"},
+            coordinates={"time": "time", "lat": "lat", "lon": "lon"},
+        )
+        arr_dataset = Dataset.from_arrays(
+            {"u": ds["u"].values},
+            t=ds["time"].values,  # datetime64[D], passed in raw
+            lat=ds["lat"].values,
+            lon=ds["lon"].values,
+        )
+        assert jnp.allclose(ds_dataset["u"].t_coords, arr_dataset["u"].t_coords)
+
     def test_from_arrays_and_from_xarray_agree(self):
         """from_arrays and from_xarray must produce identical field values."""
         ds = make_synthetic_ds()

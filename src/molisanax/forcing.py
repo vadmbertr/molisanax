@@ -19,6 +19,23 @@ if TYPE_CHECKING:
 __all__ = ["Field", "Dataset"]
 
 
+def _coerce_time_to_seconds(t: Array) -> Array:
+    """Convert a datetime64 time coordinate to int seconds; pass-through otherwise.
+
+    Both ``Dataset.from_arrays`` and ``Dataset.from_xarray`` route through this
+    helper, so users may pass NumPy ``datetime64`` arrays (any unit) directly:
+    they are reinterpreted as seconds since the Unix epoch. Plain numeric arrays
+    are returned unchanged and are treated as "seconds since some reference"
+    (only differences matter to the solver).
+    """
+    import numpy as np
+
+    t_arr = np.asarray(t)
+    if t_arr.dtype.kind == "M":
+        return t_arr.astype("datetime64[s]").astype(np.int64)
+    return t_arr
+
+
 def _nearest_idx(coords: Float[Array, "n"], x: Float[Array, ""], n: int) -> Array:
     """Nearest-neighbour index on an equally-spaced 1-D grid, clamped to [0, n-1]."""
     x0 = coords[0]
@@ -204,7 +221,10 @@ class Dataset(eqx.Module):
 
         Args:
             fields: Mapping {field_name: array of shape (time, lat, lon)}.
-            t: 1-D time coordinate array (seconds), equally spaced.
+            t: 1-D time coordinate array. Either equally-spaced numeric values
+                (seconds since an arbitrary reference) or a NumPy ``datetime64``
+                array (any unit); the latter is auto-converted to int seconds
+                since the Unix epoch.
             lat: 1-D latitude coordinate array (degrees), equally spaced.
             lon: 1-D longitude coordinate array (degrees), equally spaced.
             dtype: JAX dtype for all arrays (default float32).
@@ -215,6 +235,7 @@ class Dataset(eqx.Module):
         Returns:
             Dataset with all fields on the given grid.
         """
+        t = _coerce_time_to_seconds(t)
         t_arr   = jnp.asarray(t,   dtype=dtype)
         lat_arr = jnp.asarray(lat, dtype=dtype)
         lon_arr = jnp.asarray(lon, dtype=dtype)
@@ -252,20 +273,12 @@ class Dataset(eqx.Module):
         Returns:
             Dataset with all fields loaded into host memory as JAX arrays.
         """
-        import numpy as np
-
-        t_raw = ds[coordinates["time"]].values
-        if hasattr(t_raw.dtype, "kind") and t_raw.dtype.kind == "M":
-            t = t_raw.astype("datetime64[s]").astype(np.int64)
-        else:
-            t = t_raw
-
         field_arrays = {
             internal: ds[xr_name].values for internal, xr_name in fields.items()
         }
         return Dataset.from_arrays(
             field_arrays,
-            t=t,
+            t=ds[coordinates["time"]].values,
             lat=ds[coordinates["lat"]].values,
             lon=ds[coordinates["lon"]].values,
             dtype=dtype,

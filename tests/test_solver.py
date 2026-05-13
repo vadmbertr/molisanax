@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from molisanax.solver import Euler, Heun, solve
+from molisanax.solver import RK4, Euler, Heun, solve
 
 
 # ODE term: constant velocity
@@ -60,6 +60,20 @@ class TestSolverStep:
         z = jnp.ones(2)
         y1 = solver.sde_step(term, jnp.array(0.0), y0, jnp.array(0.01), None, z)
         assert jnp.all(jnp.isfinite(y1))
+
+    def test_rk4_ode_step_constant_field(self):
+        solver = RK4()
+        y0 = jnp.array([0.0, 0.0])
+        y1 = solver.ode_step(uniform_ode_term(0.1, 0.2), jnp.array(0.0), y0, jnp.array(1.0), None)
+        assert jnp.allclose(y1, jnp.array([0.1, 0.2]))
+
+    def test_rk4_sde_step_zero_noise(self):
+        solver = RK4()
+        y0 = jnp.array([0.0, 0.0])
+        term = uniform_sde_term(0.1, 0.2, noise_scale=0.0)
+        z = jnp.zeros(2)
+        y1 = solver.sde_step(term, jnp.array(0.0), y0, jnp.array(1.0), None, z)
+        assert jnp.allclose(y1, jnp.array([0.1, 0.2]))
 
 
 class TestSolveODE:
@@ -127,6 +141,101 @@ class TestSolveODE:
         ts = jnp.linspace(0.0, 10.0, 5)
         traj = solve(uniform_ode_term(0.0, 0.0), None, y0, ts)
         assert traj.shape == (5, 2)
+
+    def test_uniform_field_rk4(self):
+        dlat, dlon = 1e-4, 2e-4
+        y0 = jnp.array([10.0, 20.0])
+        ts = self._ts()
+        T = float(ts[-1] - ts[0])
+        traj = solve(uniform_ode_term(dlat, dlon), None, y0, ts, RK4())
+        assert traj.shape == (len(ts), 2)
+        # RK4 is exact for constant velocity (up to float32 accumulation).
+        assert float(traj[-1, 0]) == pytest.approx(float(y0[0]) + dlat * T, rel=1e-4)
+        assert float(traj[-1, 1]) == pytest.approx(float(y0[1]) + dlon * T, rel=1e-4)
+
+    def test_rk4_convergence_order_on_linear_field(self):
+        # Velocity grows linearly with lat: v_lat(t, y) = alpha * y[0].
+        # Exact solution: y(T) = y0 * exp(alpha * T). RK4 should hit 4th-order
+        # accuracy and clearly outperform Heun under step refinement.
+        # Use float64 so the truncation error dominates over rounding error.
+        from jax import config
+
+        config.update("jax_enable_x64", True)
+        try:
+            alpha = 0.1
+
+            def term(t, y, args):
+                return jnp.array([alpha * y[0], 0.0], dtype=jnp.float64)
+
+            y0 = jnp.array([1.0, 0.0], dtype=jnp.float64)
+            T = 1.0
+            exact = float(y0[0]) * float(jnp.exp(alpha * T))
+
+            def err(solver, n):
+                ts = jnp.linspace(0.0, T, n + 1, dtype=jnp.float64)
+                return abs(float(solve(term, None, y0, ts, solver)[-1, 0]) - exact)
+
+            err_rk4_coarse = err(RK4(), 4)
+            err_rk4_fine   = err(RK4(), 8)
+            err_heun_coarse = err(Heun(), 4)
+
+            # RK4 reduces error by ~16x when dt is halved (4th order).
+            assert err_rk4_coarse / max(err_rk4_fine, 1e-30) > 8.0
+            # And RK4 is strictly more accurate than Heun at the same step count.
+            assert err_rk4_coarse < err_heun_coarse
+        finally:
+            config.update("jax_enable_x64", False)
+
+    def test_rk4_reverse_mode_grad(self):
+        y0 = jnp.array([10.0, 20.0])
+        ts = jnp.linspace(0.0, 100.0, 11)
+        term = uniform_ode_term(1e-4, 0.0)
+
+        def loss(y0_):
+            return solve(term, None, y0_, ts, RK4())[-1, 0]
+
+        g = jax.grad(loss)(y0)
+        assert float(g[0]) == pytest.approx(1.0, abs=1e-5)
+        assert float(g[1]) == pytest.approx(0.0, abs=1e-5)
+
+    # --- backwards-in-time ---
+
+    def test_backwards_in_time_constant_field(self):
+        # Integrating backwards from y0 with constant velocity over time T
+        # produces y0 - v*T.
+        dlat, dlon = 1e-4, 2e-4
+        y0 = jnp.array([10.0, 20.0])
+        ts = jnp.linspace(100.0, 0.0, 101)  # strictly decreasing
+        T = float(ts[0] - ts[-1])
+        traj = solve(uniform_ode_term(dlat, dlon), None, y0, ts, Heun())
+        assert traj.shape == (len(ts), 2)
+        assert float(traj[-1, 0]) == pytest.approx(float(y0[0]) - dlat * T, rel=1e-5)
+        assert float(traj[-1, 1]) == pytest.approx(float(y0[1]) - dlon * T, rel=1e-5)
+
+    def test_forward_then_backward_returns_to_origin(self):
+        # Run forward to T, then backward from the end point to 0: should
+        # land back at y0 to within solver accuracy.
+        dlat, dlon = 1e-4, 2e-4
+        y0 = jnp.array([10.0, 20.0])
+        ts_fwd = jnp.linspace(0.0, 100.0, 51)
+        ts_bwd = jnp.linspace(100.0, 0.0, 51)
+        term = uniform_ode_term(dlat, dlon)
+        fwd = solve(term, None, y0, ts_fwd, RK4())
+        bwd = solve(term, None, fwd[-1], ts_bwd, RK4())
+        assert jnp.allclose(bwd[-1], y0, atol=1e-8)
+
+    def test_backwards_jit_and_grad(self):
+        y0 = jnp.array([10.0, 20.0])
+        ts = jnp.linspace(50.0, 0.0, 11)
+        term = uniform_ode_term(1e-4, 0.0)
+        traj = jax.jit(lambda y: solve(term, None, y, ts))(y0)
+        assert traj.shape == (11, 2)
+
+        def loss(y0_):
+            return solve(term, None, y0_, ts)[-1, 0]
+
+        g = jax.grad(loss)(y0)
+        assert float(g[0]) == pytest.approx(1.0, abs=1e-5)
 
 
 class TestSolveSDE:
