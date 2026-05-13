@@ -2,12 +2,15 @@
 
 import jax.numpy as jnp
 
-from ._types import Array, Float, Int
+from ._safe_math import safe_divide
+from ._types import Array, Bool, Float, Int
 
 __all__ = [
     "linear_interp_1d",
     "bilinear_interp_2d",
     "spatiotemporal_interp",
+    "bilinear_velocity_partialslip_2d",
+    "spatiotemporal_velocity_partialslip",
 ]
 
 
@@ -78,6 +81,7 @@ def bilinear_interp_2d(
     lat: Float[Array, ""],
     lon: Float[Array, ""],
     lon_period: float | None = None,
+    mask: Bool[Array, "lat lon"] | None = None,
 ) -> Float[Array, ""]:
     """Bilinearly interpolate a 2-D field on an equally-spaced rectilinear grid.
 
@@ -93,6 +97,20 @@ def bilinear_interp_2d(
             ``lon_coords[-1] + dlon`` is identified with ``lon_coords[0]``.
             ``None`` (default) reproduces the non-wrapping behaviour with
             linear extrapolation past the boundary.
+        mask: Optional 2-D boolean land mask, same shape as ``values``.
+            ``True`` marks a land cell. Behaviour by mixed-corner count:
+
+            * All four corners ocean → standard bilinear (bit-exact identical
+              to the ``mask=None`` path).
+            * Mixed corners → inverse-distance partial-cell weighting on the
+              ocean corners in normalised cell coordinates
+              (``d² = α² + β² + ε`` where ``α``, ``β`` are the fractional
+              distances along the cell axes); land corners are dropped.
+            * All four corners land → returns ``0`` (zero velocity for
+              fully-grounded cells).
+
+            The ``ε`` floor and :func:`safe_divide` keep both forward and
+            backward passes finite for queries on or near a corner.
 
     Returns:
         Interpolated scalar value at ``(lat, lon)``.
@@ -105,12 +123,52 @@ def bilinear_interp_2d(
         nlon = lon_coords.shape[0]
         jl, wj = _periodic_index_and_weight(lon_coords, lon, lon_period)
         jl1 = (jl + 1) % nlon
-    return (
-        values[il,     jl ] * (1.0 - wl) * (1.0 - wj)
-        + values[il + 1, jl ] * wl         * (1.0 - wj)
-        + values[il,     jl1] * (1.0 - wl) * wj
-        + values[il + 1, jl1] * wl         * wj
+
+    v00 = values[il,     jl ]
+    v10 = values[il + 1, jl ]
+    v01 = values[il,     jl1]
+    v11 = values[il + 1, jl1]
+    naive = (
+        v00 * (1.0 - wl) * (1.0 - wj)
+        + v10 * wl         * (1.0 - wj)
+        + v01 * (1.0 - wl) * wj
+        + v11 * wl         * wj
     )
+    if mask is None:
+        return naive
+
+    o00 = ~mask[il,     jl ]
+    o10 = ~mask[il + 1, jl ]
+    o01 = ~mask[il,     jl1]
+    o11 = ~mask[il + 1, jl1]
+    n_ocean = (
+        o00.astype(jnp.int32) + o10.astype(jnp.int32)
+        + o01.astype(jnp.int32) + o11.astype(jnp.int32)
+    )
+
+    eps = jnp.asarray(1e-7, dtype=naive.dtype)
+    wl_lo = wl
+    wl_hi = 1.0 - wl
+    wj_lo = wj
+    wj_hi = 1.0 - wj
+    d00 = wl_lo * wl_lo + wj_lo * wj_lo + eps
+    d10 = wl_hi * wl_hi + wj_lo * wj_lo + eps
+    d01 = wl_lo * wl_lo + wj_hi * wj_hi + eps
+    d11 = wl_hi * wl_hi + wj_hi * wj_hi + eps
+
+    one = jnp.asarray(1.0, dtype=naive.dtype)
+    zero = jnp.asarray(0.0, dtype=naive.dtype)
+    iw00 = jnp.where(o00, one / d00, zero)
+    iw10 = jnp.where(o10, one / d10, zero)
+    iw01 = jnp.where(o01, one / d01, zero)
+    iw11 = jnp.where(o11, one / d11, zero)
+    weighted = v00 * iw00 + v10 * iw10 + v01 * iw01 + v11 * iw11
+    total = iw00 + iw10 + iw01 + iw11
+    invdist = safe_divide(weighted, total)
+
+    all_ocean = n_ocean == 4
+    all_land  = n_ocean == 0
+    return jnp.where(all_ocean, naive, jnp.where(all_land, zero, invdist))
 
 
 def spatiotemporal_interp(
@@ -122,6 +180,7 @@ def spatiotemporal_interp(
     lat: Float[Array, ""],
     lon: Float[Array, ""],
     lon_period: float | None = None,
+    mask: Bool[Array, "lat lon"] | None = None,
 ) -> Float[Array, ""]:
     """Trilinearly interpolate a field in time and space on an A-grid.
 
@@ -138,15 +197,166 @@ def spatiotemporal_interp(
         lon: Query longitude in degrees.
         lon_period: If given, treat the longitude axis as periodic with this
             period (see :func:`bilinear_interp_2d`).
+        mask: Optional 2-D land mask shared across time (see
+            :func:`bilinear_interp_2d`).
 
     Returns:
         Interpolated scalar value at ``(t, lat, lon)``.
     """
     it, wt = _index_and_weight(t_coords, t)
     v0 = bilinear_interp_2d(
-        values[it],     lat_coords, lon_coords, lat, lon, lon_period=lon_period,
+        values[it],     lat_coords, lon_coords, lat, lon,
+        lon_period=lon_period, mask=mask,
     )
     v1 = bilinear_interp_2d(
-        values[it + 1], lat_coords, lon_coords, lat, lon, lon_period=lon_period,
+        values[it + 1], lat_coords, lon_coords, lat, lon,
+        lon_period=lon_period, mask=mask,
     )
     return v0 * (1.0 - wt) + v1 * wt
+
+
+def bilinear_velocity_partialslip_2d(
+    u_values: Float[Array, "lat lon"],
+    v_values: Float[Array, "lat lon"],
+    lat_coords: Float[Array, "lat"],
+    lon_coords: Float[Array, "lon"],
+    lat: Float[Array, ""],
+    lon: Float[Array, ""],
+    mask: Bool[Array, "lat lon"],
+    slip_a: float = 0.5,
+    slip_b: float = 0.5,
+    lon_period: float | None = None,
+) -> tuple[Float[Array, ""], Float[Array, ""]]:
+    """Bilinear A-grid velocity interpolation with partial-slip wall correction.
+
+    Replaces the standard bilinear weights for ``U`` (tangential to a
+    latitudinal coast) and ``V`` (tangential to a longitudinal coast) with
+    a wall-slip-aware formula whenever an entire cell edge is land.
+
+    For a south-edge-fully-land cell with the north edge in the ocean, the
+    naive bilinear for ``U`` is ``wl * U_along_N`` where
+    ``U_along_N = (1-wj) U_NW + wj U_NE`` is the linear interpolation of
+    ``U`` along the north (ocean) edge. The partial-slip correction
+    replaces this with ``(a + b * wl) * U_along_N``: at the coast
+    (``wl = 0``) the tangential velocity is ``a * U_along_N`` rather than
+    ``0`` (which would trap the particle). The default ``a = b = 0.5``
+    gives a half-slip wall; ``a = 1, b = 0`` recovers full free-slip;
+    ``a = 0, b = 1`` recovers the no-slip naive bilinear.
+
+    Symmetrically for north-edge-land cells (using ``U_along_S`` and
+    ``(a + b * (1 - wl))``) and for ``V`` across east/west land edges.
+    Cells without a fully-land edge fall back to standard bilinear.
+
+    Args:
+        u_values: U-component values on the A-grid, shape ``(n_lat, n_lon)``.
+        v_values: V-component values, same shape as ``u_values``.
+        lat_coords: Equally-spaced latitudes, shape ``(n_lat,)``.
+        lon_coords: Equally-spaced longitudes, shape ``(n_lon,)``.
+        lat: Query latitude.
+        lon: Query longitude.
+        mask: Joint U/V land mask, ``True`` = land. Typically built as
+            ``u_mask & v_mask`` so a corner is considered land only when
+            both components are masked there.
+        slip_a: Slip coefficient at the wall. Default 0.5.
+        slip_b: Slip coefficient gradient. Default 0.5.
+        lon_period: Periodic longitude period in degrees, or ``None``.
+
+    Returns:
+        Tuple ``(u, v)`` of interpolated A-grid velocity components.
+    """
+    il, wl = _index_and_weight(lat_coords, lat)
+    if lon_period is None:
+        jl, wj = _index_and_weight(lon_coords, lon)
+        jl1 = jl + 1
+    else:
+        nlon = lon_coords.shape[0]
+        jl, wj = _periodic_index_and_weight(lon_coords, lon, lon_period)
+        jl1 = (jl + 1) % nlon
+
+    u_sw = u_values[il,     jl ]
+    u_nw = u_values[il + 1, jl ]
+    u_se = u_values[il,     jl1]
+    u_ne = u_values[il + 1, jl1]
+    v_sw = v_values[il,     jl ]
+    v_nw = v_values[il + 1, jl ]
+    v_se = v_values[il,     jl1]
+    v_ne = v_values[il + 1, jl1]
+
+    m_sw = mask[il,     jl ]
+    m_nw = mask[il + 1, jl ]
+    m_se = mask[il,     jl1]
+    m_ne = mask[il + 1, jl1]
+
+    w_sw = (1.0 - wl) * (1.0 - wj)
+    w_nw = wl         * (1.0 - wj)
+    w_se = (1.0 - wl) * wj
+    w_ne = wl         * wj
+    u_naive = u_sw * w_sw + u_nw * w_nw + u_se * w_se + u_ne * w_ne
+    v_naive = v_sw * w_sw + v_nw * w_nw + v_se * w_se + v_ne * w_ne
+
+    south_land = m_sw & m_se
+    north_land = m_nw & m_ne
+    west_land  = m_sw & m_nw
+    east_land  = m_se & m_ne
+
+    a = slip_a
+    b = slip_b
+
+    # U: corrected when a latitudinal (S or N) edge is fully land.
+    # `u_along_N` and `u_along_S` are linear interps of U along the ocean
+    # edge (computed unconditionally — they are polynomial and safe).
+    u_along_N = (1.0 - wj) * u_nw + wj * u_ne
+    u_along_S = (1.0 - wj) * u_sw + wj * u_se
+    u_south_corr = (a + b * wl)         * u_along_N
+    u_north_corr = (a + b * (1.0 - wl)) * u_along_S
+    u_corrected = jnp.where(
+        south_land & ~north_land, u_south_corr,
+        jnp.where(north_land & ~south_land, u_north_corr, u_naive),
+    )
+
+    # V: corrected when a longitudinal (E or W) edge is fully land.
+    v_along_E = (1.0 - wl) * v_se + wl * v_ne
+    v_along_W = (1.0 - wl) * v_sw + wl * v_nw
+    v_west_corr = (a + b * wj)         * v_along_E
+    v_east_corr = (a + b * (1.0 - wj)) * v_along_W
+    v_corrected = jnp.where(
+        west_land & ~east_land, v_west_corr,
+        jnp.where(east_land & ~west_land, v_east_corr, v_naive),
+    )
+
+    return u_corrected, v_corrected
+
+
+def spatiotemporal_velocity_partialslip(
+    u_values: Float[Array, "time lat lon"],
+    v_values: Float[Array, "time lat lon"],
+    t_coords: Float[Array, "time"],
+    lat_coords: Float[Array, "lat"],
+    lon_coords: Float[Array, "lon"],
+    t: Float[Array, ""],
+    lat: Float[Array, ""],
+    lon: Float[Array, ""],
+    mask: Bool[Array, "lat lon"],
+    slip_a: float = 0.5,
+    slip_b: float = 0.5,
+    lon_period: float | None = None,
+) -> tuple[Float[Array, ""], Float[Array, ""]]:
+    """Trilinear A-grid velocity interpolation with partial-slip wall correction.
+
+    Applies :func:`bilinear_velocity_partialslip_2d` at the two bounding
+    time slabs and blends linearly in time.
+
+    Returns:
+        Tuple ``(u, v)`` of trilinearly-interpolated A-grid velocities at
+        ``(t, lat, lon)``.
+    """
+    it, wt = _index_and_weight(t_coords, t)
+    u0, v0 = bilinear_velocity_partialslip_2d(
+        u_values[it], v_values[it], lat_coords, lon_coords, lat, lon,
+        mask, slip_a=slip_a, slip_b=slip_b, lon_period=lon_period,
+    )
+    u1, v1 = bilinear_velocity_partialslip_2d(
+        u_values[it + 1], v_values[it + 1], lat_coords, lon_coords, lat, lon,
+        mask, slip_a=slip_a, slip_b=slip_b, lon_period=lon_period,
+    )
+    return (u0 * (1.0 - wt) + u1 * wt, v0 * (1.0 - wt) + v1 * wt)
