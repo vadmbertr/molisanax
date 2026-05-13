@@ -10,7 +10,7 @@ import jax.numpy as jnp
 
 from ._types import Array, Bool, Float
 from .grid import Grid
-from .interpolation import spatiotemporal_interp
+from .interpolation import spatiotemporal_interp, spatiotemporal_velocity_partialslip
 
 if TYPE_CHECKING:
     import numpy as np
@@ -237,6 +237,91 @@ class Dataset(eqx.Module):
             name: field.neighborhood(t, lat, lon, t_window, lat_window, lon_window)
             for name, field in self.fields.items()
         }
+
+    def velocity_interp(
+        self,
+        t: Float[Array, ""],
+        lat: Float[Array, ""],
+        lon: Float[Array, ""],
+        *,
+        scheme: Literal["default", "partialslip"] = "default",
+        u_name: str = "u",
+        v_name: str = "v",
+        slip_a: float = 0.5,
+        slip_b: float = 0.5,
+    ) -> Float[Array, "2"]:
+        """Interpolate the ``(U, V)`` velocity vector at a single point.
+
+        Returns ``[v_value, u_value]`` so the result can be used directly
+        as the ``[dlat/dt, dlon/dt]`` part of a solver term (after the
+        usual metres-to-degrees conversion if applicable).
+
+        Args:
+            t: Query time in seconds.
+            lat: Query latitude in degrees.
+            lon: Query longitude in degrees.
+            scheme: Coastal interpolation scheme.
+
+                * ``"default"`` (default) — composes per-field
+                  :meth:`Field.interp` for ``V`` and ``U``. Each field uses
+                  its own scheme as configured by its mask: bilinear with
+                  inverse-distance partial-cell weighting when a mask is
+                  present, plain bilinear otherwise.
+                * ``"partialslip"`` — A-grid only. Reads ``U`` and ``V``
+                  together with their joint land mask (the AND of both
+                  fields' masks) and applies a wall-slip correction
+                  whenever a full cell edge is land:
+                  ``U`` is rescaled by ``(slip_a + slip_b * wl)`` near a
+                  latitudinal coast and ``V`` by ``(slip_a + slip_b * wj)``
+                  near a longitudinal coast. The default ``a = b = 0.5``
+                  gives a half-slip wall; ``a = 1, b = 0`` recovers
+                  full free-slip. Requires both U and V to carry a mask;
+                  raises ``ValueError`` otherwise. Raises
+                  ``NotImplementedError`` on Arakawa C-grid datasets.
+
+            u_name: Name of the U-component Field in ``self.fields``.
+            v_name: Name of the V-component Field in ``self.fields``.
+            slip_a: Wall slip coefficient (partial-slip only).
+            slip_b: Wall slip gradient coefficient (partial-slip only).
+
+        Returns:
+            ``[v, u]`` velocity vector of shape ``(2,)``.
+        """
+        u_field = self.fields[u_name]
+        v_field = self.fields[v_name]
+
+        if scheme == "default":
+            v = v_field.interp(t, lat, lon)
+            u = u_field.interp(t, lat, lon)
+            return jnp.stack([v, u])
+
+        if scheme == "partialslip":
+            if self.grid is not None and self.grid.stagger_type == "C":
+                raise NotImplementedError(
+                    "scheme='partialslip' is not implemented for Arakawa "
+                    "C-grid datasets. Use scheme='default' (per-Field "
+                    "inverse-distance) or convert to A-grid forcing."
+                )
+            if u_field.mask is None or v_field.mask is None:
+                raise ValueError(
+                    "scheme='partialslip' requires both U and V fields to "
+                    "carry a 2-D land mask. Provide masks via the loader "
+                    "(NaN-inferred or explicit)."
+                )
+            joint_mask = u_field.mask & v_field.mask
+            u, v = spatiotemporal_velocity_partialslip(
+                u_field.values, v_field.values,
+                u_field.t_coords, u_field.lat_coords, u_field.lon_coords,
+                t, lat, lon, joint_mask,
+                slip_a=slip_a, slip_b=slip_b,
+                lon_period=u_field.lon_period,
+            )
+            return jnp.stack([v, u])
+
+        raise ValueError(
+            f"Unknown velocity_interp scheme {scheme!r}; "
+            "expected 'default' or 'partialslip'."
+        )
 
     @staticmethod
     def from_arrays(
