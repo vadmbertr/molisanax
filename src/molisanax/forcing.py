@@ -304,3 +304,178 @@ class Dataset(eqx.Module):
             dtype=dtype,
             lon_period=lon_period,
         )
+
+    @staticmethod
+    def from_arrays_cgrid(
+        t: Array,
+        center_lat: Array,
+        center_lon: Array,
+        u_values: Array,
+        v_values: Array,
+        tracers: dict[str, Array] | None = None,
+        *,
+        u_lat: Array | None = None,
+        u_lon: Array | None = None,
+        v_lat: Array | None = None,
+        v_lon: Array | None = None,
+        dtype: DTypeLike = jnp.float32,
+        lon_period: float | None = None,
+    ) -> Dataset:
+        """Build a Dataset on a NEMO-convention Arakawa C-grid.
+
+        The centre grid ``(center_lat, center_lon)`` carries any tracer
+        fields. U lives on the east faces of the centre cells (one fewer
+        longitude column) and V lives on the north faces (one fewer
+        latitude row). When the staggered coordinate arrays are omitted
+        they are auto-derived from the centre grid as half-cell shifts
+        (see :meth:`Grid.u_face_coords` / :meth:`Grid.v_face_coords`).
+
+        Args:
+            t: 1-D time coordinates (seconds or NumPy ``datetime64``).
+            center_lat: 1-D centre latitudes (degrees), equally spaced.
+            center_lon: 1-D centre longitudes (degrees), equally spaced.
+            u_values: U-component values, shape ``(time, nlat, nlon - 1)``.
+            v_values: V-component values, shape ``(time, nlat - 1, nlon)``.
+            tracers: Optional mapping ``{name: array of shape (time, nlat, nlon)}``
+                for additional fields at cell centres.
+            u_lat: Override for U latitudes (defaults to ``center_lat``).
+            u_lon: Override for U longitudes (defaults to centre lons shifted
+                east by half a cell, length ``nlon - 1``).
+            v_lat: Override for V latitudes (defaults to centre lats shifted
+                north by half a cell, length ``nlat - 1``).
+            v_lon: Override for V longitudes (defaults to ``center_lon``).
+            dtype: JAX dtype for all arrays (default float32).
+            lon_period: If set (e.g. ``360.0``), the centre grid is treated
+                as periodic in longitude. Tracer fields receive
+                ``lon_period``; U/V faces do not (their coordinate arrays
+                no longer span a full period, so periodic wrapping would be
+                ill-defined at first order).
+
+        Returns:
+            Dataset with ``fields={"u": Field(stagger="u_face"),
+            "v": Field(stagger="v_face"), **tracers}`` and a C-grid
+            :class:`Grid` metadata object.
+        """
+        t = _coerce_time_to_seconds(t)
+        t_arr   = jnp.asarray(t,           dtype=dtype)
+        lat_arr = jnp.asarray(center_lat,  dtype=dtype)
+        lon_arr = jnp.asarray(center_lon,  dtype=dtype)
+
+        nt   = int(t_arr.shape[0])
+        nlat = int(lat_arr.shape[0])
+        nlon = int(lon_arr.shape[0])
+
+        u_arr = jnp.asarray(u_values, dtype=dtype)
+        v_arr = jnp.asarray(v_values, dtype=dtype)
+        _check_cgrid_shape("u_values", u_arr.shape, (nt, nlat, nlon - 1))
+        _check_cgrid_shape("v_values", v_arr.shape, (nt, nlat - 1, nlon))
+
+        grid = Grid(
+            t_coords=t_arr,
+            lat_coords=lat_arr,
+            lon_coords=lon_arr,
+            grid_type="rectilinear",
+            stagger_type="C",
+            lon_period=lon_period,
+        )
+        derived_u_lat, derived_u_lon = grid.u_face_coords()
+        derived_v_lat, derived_v_lon = grid.v_face_coords()
+
+        u_lat_arr = jnp.asarray(u_lat, dtype=dtype) if u_lat is not None else derived_u_lat
+        u_lon_arr = jnp.asarray(u_lon, dtype=dtype) if u_lon is not None else derived_u_lon
+        v_lat_arr = jnp.asarray(v_lat, dtype=dtype) if v_lat is not None else derived_v_lat
+        v_lon_arr = jnp.asarray(v_lon, dtype=dtype) if v_lon is not None else derived_v_lon
+        _check_cgrid_shape("u_lat", u_lat_arr.shape, (nlat,))
+        _check_cgrid_shape("u_lon", u_lon_arr.shape, (nlon - 1,))
+        _check_cgrid_shape("v_lat", v_lat_arr.shape, (nlat - 1,))
+        _check_cgrid_shape("v_lon", v_lon_arr.shape, (nlon,))
+
+        loaded: dict[str, Field] = {
+            "u": Field(
+                values=u_arr, t_coords=t_arr,
+                lat_coords=u_lat_arr, lon_coords=u_lon_arr,
+                lon_period=None, stagger="u_face",
+            ),
+            "v": Field(
+                values=v_arr, t_coords=t_arr,
+                lat_coords=v_lat_arr, lon_coords=v_lon_arr,
+                lon_period=None, stagger="v_face",
+            ),
+        }
+        if tracers:
+            for name, arr in tracers.items():
+                a = jnp.asarray(arr, dtype=dtype)
+                _check_cgrid_shape(f"tracers[{name!r}]", a.shape, (nt, nlat, nlon))
+                loaded[name] = Field(
+                    values=a, t_coords=t_arr,
+                    lat_coords=lat_arr, lon_coords=lon_arr,
+                    lon_period=lon_period, stagger="center",
+                )
+        return Dataset(fields=loaded, grid=grid)
+
+    @staticmethod
+    def from_xarray_cgrid(
+        ds: xr.Dataset,
+        *,
+        u_name: str,
+        v_name: str,
+        coordinates: dict[str, str],
+        tracers: dict[str, str] | None = None,
+        staggered_coordinates: dict[str, str] | None = None,
+        dtype: DTypeLike = jnp.float32,
+        lon_period: float | None = None,
+    ) -> Dataset:
+        """Load a C-grid Dataset from an xarray Dataset.
+
+        Centre coordinates (used for time and tracer fields) come from
+        ``coordinates``; staggered U/V coordinates are auto-derived from
+        the centre grid as half-cell shifts unless overridden via
+        ``staggered_coordinates``.
+
+        Args:
+            ds: Source xarray Dataset.
+            u_name: xarray variable name for the U component
+                (shape ``(time, nlat, nlon - 1)``).
+            v_name: xarray variable name for the V component
+                (shape ``(time, nlat - 1, nlon)``).
+            coordinates: Mapping with keys ``"time"``, ``"lat"``, ``"lon"``
+                → xarray coord names for the centre grid.
+            tracers: Optional ``{internal_name: xarray_variable_name}`` for
+                extra centre-grid fields.
+            staggered_coordinates: Optional override mapping with any
+                subset of keys ``"u_lat"``, ``"u_lon"``, ``"v_lat"``,
+                ``"v_lon"`` → xarray coord names. Unspecified keys are
+                auto-derived.
+            dtype: JAX dtype for all arrays (default float32).
+            lon_period: Forwarded to :meth:`from_arrays_cgrid`.
+
+        Returns:
+            Dataset with C-grid stagger and :class:`Grid` metadata.
+        """
+        stag = staggered_coordinates or {}
+        return Dataset.from_arrays_cgrid(
+            t=ds[coordinates["time"]].values,
+            center_lat=ds[coordinates["lat"]].values,
+            center_lon=ds[coordinates["lon"]].values,
+            u_values=ds[u_name].values,
+            v_values=ds[v_name].values,
+            tracers={
+                internal: ds[xr_name].values
+                for internal, xr_name in (tracers or {}).items()
+            } or None,
+            u_lat=ds[stag["u_lat"]].values if "u_lat" in stag else None,
+            u_lon=ds[stag["u_lon"]].values if "u_lon" in stag else None,
+            v_lat=ds[stag["v_lat"]].values if "v_lat" in stag else None,
+            v_lon=ds[stag["v_lon"]].values if "v_lon" in stag else None,
+            dtype=dtype,
+            lon_period=lon_period,
+        )
+
+
+def _check_cgrid_shape(name: str, got: tuple[int, ...], expected: tuple[int, ...]) -> None:
+    if got != expected:
+        raise ValueError(
+            f"C-grid shape mismatch for {name}: expected {expected}, got {got}. "
+            f"NEMO convention requires U at shape (time, nlat, nlon-1) and "
+            f"V at shape (time, nlat-1, nlon)."
+        )
