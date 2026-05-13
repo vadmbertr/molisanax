@@ -2,6 +2,7 @@
 
 from ._safe_math import safe_divide, safe_log, safe_sqrt
 from .forcing import Dataset, Field
+from .grid import Grid
 from .geo import (
     EARTH_RADIUS,
     degrees_to_meters,
@@ -31,6 +32,7 @@ __all__ = [
     # forcing
     "Field",
     "Dataset",
+    "Grid",
     # solver
     "Euler",
     "Heun",
