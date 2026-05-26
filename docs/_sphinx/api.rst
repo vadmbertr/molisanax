@@ -11,10 +11,12 @@ the source by ``sphinx.ext.autodoc`` with Google-style docstrings.
    forcing
    geo
    interpolation
-   metrics
+   metric
+   score
 
 * :doc:`molisanax.solver <solver>`
 * :doc:`molisanax.forcing <forcing>`
 * :doc:`molisanax.geo <geo>`
 * :doc:`molisanax.interpolation <interpolation>`
-* :doc:`molisanax.metrics <metrics>`
+* :doc:`molisanax.metric <metric>`
+* :doc:`molisanax.score <score>`

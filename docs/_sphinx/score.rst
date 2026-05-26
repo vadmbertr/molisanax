@@ -1,7 +1,7 @@
-`molisanax.metrics`
+`molisanax.score`
 ===================
 
-.. automodule:: molisanax.metrics
+.. automodule:: molisanax.score
    :members:
    :undoc-members:
    :show-inheritance:

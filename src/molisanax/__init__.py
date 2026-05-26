@@ -10,11 +10,10 @@ from .geo import (
     meters_to_degrees,
 )
 from .interpolation import bilinear_interp_2d, linear_interp_1d, spatiotemporal_interp
-from .metrics import liu_index, normalized_separation_distance, separation_distance
+from .metric import liu_index, normalized_separation_distance, separation_distance
 from .score import (
     dawid_sebastiani,
     energy_score,
-    l2_distance,
     squared_error,
     variogram_score,
 )
@@ -45,12 +44,11 @@ __all__ = [
     "Heun",
     "RK4",
     "solve",
-    # metrics
+    # metric
     "separation_distance",
     "normalized_separation_distance",
     "liu_index",
     # score
-    "l2_distance",
     "squared_error",
     "dawid_sebastiani",
     "energy_score",

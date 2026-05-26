@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 
 from molisanax.geo import EARTH_RADIUS
-from molisanax.metrics import liu_index, normalized_separation_distance, separation_distance
+from molisanax.metric import liu_index, normalized_separation_distance, separation_distance
 
 
 class TestSeparationDistance:

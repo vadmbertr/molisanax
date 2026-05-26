@@ -1,6 +1,6 @@
 """Proper scoring rules for probabilistic (ensemble) trajectory forecasts.
 
-Implements four scoring rules from Pic et al. (2025) for ensemble forecasts
+Implements four scoring rules (see Pic et al., 2025) for ensemble forecasts
 of shape ``(S, T, 2)`` evaluated against an observed trajectory ``(T, 2)``:
 
 - :func:`squared_error` — deterministic-mean squared distance.
@@ -34,7 +34,6 @@ from ._safe_math import safe_sqrt
 from ._types import Array, Float
 
 __all__ = [
-    "l2_distance",
     "squared_error",
     "dawid_sebastiani",
     "energy_score",
@@ -52,20 +51,6 @@ def l2_distance(
     x: Float[Array, "... 2"],
     y: Float[Array, "... 2"],
 ) -> Float[Array, "..."]:
-    """Gradient-safe Euclidean distance along the last axis.
-
-    Uses :func:`molisanax.safe_sqrt` so that the gradient at ``x == y`` is
-    well-defined (zero) instead of ``NaN``. This is required for the energy
-    score, whose pairwise term evaluates the kernel on the diagonal.
-
-    Args:
-        x: First array, shape ``(..., 2)``.
-        y: Second array, shape ``(..., 2)``, broadcastable with ``x``.
-
-    Returns:
-        Elementwise Euclidean distance with shape equal to the broadcast of
-        the leading axes of ``x`` and ``y``.
-    """
     return safe_sqrt(jnp.sum((x - y) ** 2, axis=-1))
 
 
@@ -98,9 +83,7 @@ def squared_error(
     ``SE_t = kernel(mean_s forecast[s, t], obs[t]) ** 2``.
 
     With the default L2 kernel this is the squared error of the ensemble
-    mean (Pic et al. 2025, Eq. 11). With a non-L2 kernel (e.g. haversine)
-    it generalises to a squared metric distance — proper but not necessarily
-    strictly proper.
+    mean (Pic et al. 2025, Eq. 11).
 
     Args:
         forecast: Ensemble forecast, shape ``(S, T, 2)``.

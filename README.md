@@ -8,8 +8,6 @@
 
 ## Project Status
 
-**v0.1.0 — fifth iteration.** Core functionality implemented and tested (183 tests):
-
 - Bilinear interpolation of rectilinear forcing fields, with neighbourhood extraction
 - A-grid and NEMO-convention Arakawa C-grid forcing layouts (`Dataset.from_arrays_cgrid` / `from_xarray_cgrid`)
 - Coastal robustness on A-grid: NaN-inferred land masks, inverse-distance partial-cell bilinear, and an opt-in partial-slip scheme via `Dataset.velocity_interp`
@@ -18,15 +16,18 @@
 - Forward or backwards-in-time integration (pass an increasing or decreasing `ts`)
 - Geographic unit conversions (metres ↔ degrees)
 - Along-trajectory metrics with optional ensemble (vmap) mode
+- (Proper) Scoring rules to evaluate stochastic simulators
 - xarray (zarr/netCDF) dataset loading; also `Dataset.from_arrays` for plain numpy/JAX arrays
 
 See [`docs/project_status.md`](docs/project_status.md) for current capabilities and known limitations.
 
 ## Installation
 
+From Git;
+
 ```bash
-pip install molisanax                      # core (JAX, Equinox, jaxtyping)
-pip install "molisanax[forcing]"           # + xarray, zarr, netCDF4
+pip install git+https://github.com/vadmbertr/molisanax             # core (JAX, Equinox, jaxtyping)
+pip install "git+https://github.com/vadmbertr/molisanax[forcing]"  # + xarray, zarr, netCDF4
 ```
 
 From source:
@@ -36,6 +37,8 @@ git clone https://github.com/vadmbertr/molisanax
 cd molisanax
 pip install -e ".[dev]"
 ```
+
+Installing a JAX **GPU version** should be done prior to installing `molisanax`, following [https://docs.jax.dev/en/latest/installation.html](https://docs.jax.dev/en/latest/installation.html).
 
 ## Quick Start
 
@@ -277,6 +280,36 @@ li  = liu_index(trajectory, reference)                    # (T,), dimensionless
 # Ensemble metrics — vmap handled automatically
 sep_ens = separation_distance(ensemble, reference, ensemble=True)  # (S, T)
 li_ens  = liu_index(ensemble, reference, ensemble=True)            # (S, T)
+```
+
+### (Proper) Scoring rules
+
+```python
+from molisanax import dawid_sebastiani, energy_score, squared_error, variogram_score
+
+# Along trajectory scores
+ds_ts = dawid_sebastiani(ens, ref, reduce=None)  # (T,)
+es_ts = energy_score(ens, ref, reduce=None)  # (T,)
+se_ts = squared_error(ens, ref, reduce=None)  # (T,)
+vs_ts = variogram_score(ens, ref, reduce=None)  # (T,)
+
+# Final scores
+ds_t1 = dawid_sebastiani(ens, ref, reduce="last")  # scalar
+es_t1 = energy_score(ens, ref, reduce="last")  # scalar
+se_t1 = squared_error(ens, ref, reduce="last")  # scalar
+vs_t1 = variogram_score(ens, ref, reduce="last")  # scalar
+
+# Aggregated scores
+ds_agg = dawid_sebastiani(ens, ref, reduce="sum")  # scalar
+es_agg = energy_score(ens, ref, reduce="sum")  # scalar
+se_agg = squared_error(ens, ref, reduce="sum")  # scalar
+vs_agg = variogram_score(ens, ref, reduce="sum")  # scalar
+
+from molisanax import haversine
+
+# Custom score kernel (relevant for the energy score and the square error only)
+es_agg = energy_score(ens, ref, kernel=haversine)
+se_agg = squared_error(ens, ref, kernel=haversine)
 ```
 
 ## API Reference
