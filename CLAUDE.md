@@ -115,3 +115,17 @@ After **three consecutive failed attempts** to fix the same problem:
 - **`librarian`** — external library research, GitHub permalinks (invoke for unfamiliar packages)
 - **`explore`** — fast codebase grep, symbol lookup (invoke freely, in parallel)
 - **`multimodal-looker`** — PDF, image, diagram interpretation (invoke for non-text media)
+
+---
+
+## Git Identity
+
+Before the first commit in any session, set the author/committer identity:
+
+```bash
+git config user.name "Vadim Bertrand"
+git config user.email "36510417+vadmbertr@users.noreply.github.com"
+```
+
+Keep the `Co-Authored-By: Claude` trailer on commit messages.
+Web sessions cannot sign commits — commits will be unsigned; do not attempt GPG/SSH signing.
