@@ -41,48 +41,50 @@ def haversine(
 
 
 def meters_to_degrees(
-    arr: Float[Array, "... 2"],
-    lat: Float[Array, ""],
+    disp_m: Float[Array, "... 2"],
+    lat_deg: Float[Array, ""],
 ) -> Float[Array, "... 2"]:
     """Convert a ``[north, east]`` displacement in metres to ``[dlat, dlon]`` in degrees.
 
-    Uses a flat-Earth approximation around ``lat``: the meridional component
-    is converted via ``EARTH_RADIUS``; the zonal component is additionally
-    divided by ``cos(lat)`` to account for shrinking longitude circles toward
-    the poles.
+    Uses a flat-Earth approximation around ``lat_deg``: the meridional
+    component is converted via ``EARTH_RADIUS``; the zonal component is
+    additionally divided by ``cos(lat)`` to account for shrinking longitude
+    circles toward the poles.
 
     Args:
-        arr: Displacement(s) ``[north, east]`` in metres. The last axis must
-            have size 2; leading axes are passed through unchanged.
-        lat: Reference latitude in degrees, used for the longitude scaling.
+        disp_m: Displacement(s) ``[north, east]`` in **metres**. The last axis
+            must have size 2; leading axes are passed through unchanged.
+        lat_deg: Reference latitude in **degrees**, used for the longitude
+            scaling.
 
     Returns:
-        Same shape as ``arr``, but expressed as ``[dlat, dlon]`` in degrees.
+        Same shape as ``disp_m``, but expressed as ``[dlat, dlon]`` in **degrees**.
     """
-    rad = arr / EARTH_RADIUS
+    rad = disp_m / EARTH_RADIUS
     deg = jnp.degrees(rad)
-    lon_scale = jnp.cos(jnp.radians(lat))
+    lon_scale = jnp.cos(jnp.radians(lat_deg))
     return deg.at[..., 1].divide(lon_scale)
 
 
 def degrees_to_meters(
-    arr: Float[Array, "... 2"],
-    lat: Float[Array, ""],
+    disp_deg: Float[Array, "... 2"],
+    lat_deg: Float[Array, ""],
 ) -> Float[Array, "... 2"]:
     """Convert a ``[dlat, dlon]`` displacement in degrees to ``[north, east]`` in metres.
 
     Inverse of :func:`meters_to_degrees`. Uses a flat-Earth approximation
-    around ``lat``.
+    around ``lat_deg``.
 
     Args:
-        arr: Displacement(s) ``[dlat, dlon]`` in degrees. The last axis must
-            have size 2; leading axes are passed through unchanged.
-        lat: Reference latitude in degrees, used for the longitude scaling.
+        disp_deg: Displacement(s) ``[dlat, dlon]`` in **degrees**. The last
+            axis must have size 2; leading axes are passed through unchanged.
+        lat_deg: Reference latitude in **degrees**, used for the longitude
+            scaling.
 
     Returns:
-        Same shape as ``arr``, but expressed as ``[north, east]`` in metres.
+        Same shape as ``disp_deg``, but expressed as ``[north, east]`` in **metres**.
     """
-    rad = jnp.radians(arr)
+    rad = jnp.radians(disp_deg)
     meters = rad * EARTH_RADIUS
-    lon_scale = jnp.cos(jnp.radians(lat))
+    lon_scale = jnp.cos(jnp.radians(lat_deg))
     return meters.at[..., 1].multiply(lon_scale)
