@@ -17,25 +17,27 @@ EARTH_RADIUS: float = 6_371_008.8
 
 
 def haversine(
-    y1: Float[Array, "2"],
-    y2: Float[Array, "2"],
-) -> Float[Array, ""]:
-    """Great-circle distance between two ``[lat, lon]`` points.
+    y1: Float[Array, "... 2"],
+    y2: Float[Array, "... 2"],
+) -> Float[Array, "..."]:
+    """Great-circle distance between ``[lat, lon]`` points.
 
     Uses the spherical haversine formula with :data:`EARTH_RADIUS` as the
-    sphere radius.
+    sphere radius. The last axis of each input must have size 2 (lat, lon);
+    leading axes broadcast under standard NumPy/JAX rules.
 
     Args:
-        y1: First point ``[lat, lon]`` in degrees.
-        y2: Second point ``[lat, lon]`` in degrees.
+        y1: First point(s) ``[lat, lon]`` in degrees, shape ``(..., 2)``.
+        y2: Second point(s) ``[lat, lon]`` in degrees, shape ``(..., 2)``.
 
     Returns:
-        Great-circle distance in metres.
+        Great-circle distance in metres, with shape matching the broadcast of
+        the leading axes of ``y1`` and ``y2``.
     """
-    lat1 = jnp.radians(y1[0])
-    lat2 = jnp.radians(y2[0])
+    lat1 = jnp.radians(y1[..., 0])
+    lat2 = jnp.radians(y2[..., 0])
     d = jnp.radians(y1 - y2)
-    a = jnp.sin(d[0] / 2) ** 2 + jnp.cos(lat1) * jnp.cos(lat2) * jnp.sin(d[1] / 2) ** 2
+    a = jnp.sin(d[..., 0] / 2) ** 2 + jnp.cos(lat1) * jnp.cos(lat2) * jnp.sin(d[..., 1] / 2) ** 2
     c = 2.0 * jnp.arctan2(safe_sqrt(a), safe_sqrt(1.0 - a))
     return EARTH_RADIUS * c
 

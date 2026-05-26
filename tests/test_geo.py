@@ -44,6 +44,21 @@ class TestHaversine:
         g = jax.grad(lambda a: haversine(a, y))(y)
         assert jnp.all(jnp.isfinite(g))
 
+    def test_broadcasts_over_leading_axes(self):
+        a = jnp.zeros((3, 4, 2))
+        b = jnp.ones((4, 2))
+        d = haversine(a, b)
+        assert d.shape == (3, 4)
+        scalar = haversine(jnp.zeros(2), jnp.ones(2))
+        assert jnp.allclose(d, scalar)
+
+    def test_pairwise_broadcast(self):
+        pts = jnp.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+        pairwise = haversine(pts[:, None], pts[None])
+        assert pairwise.shape == (3, 3)
+        assert jnp.allclose(jnp.diag(pairwise), jnp.zeros(3), atol=1e-3)
+        assert jnp.allclose(pairwise, pairwise.T)
+
 
 class TestUnitConversions:
     def test_round_trip_at_equator(self):
