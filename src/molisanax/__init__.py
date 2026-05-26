@@ -11,6 +11,13 @@ from .geo import (
 )
 from .interpolation import bilinear_interp_2d, linear_interp_1d, spatiotemporal_interp
 from .metrics import liu_index, normalized_separation_distance, separation_distance
+from .score import (
+    dawid_sebastiani,
+    energy_score,
+    l2_distance,
+    squared_error,
+    variogram_score,
+)
 from .solver import RK4, Euler, Heun, solve
 
 __version__ = "0.1.0"
@@ -42,4 +49,10 @@ __all__ = [
     "separation_distance",
     "normalized_separation_distance",
     "liu_index",
+    # score
+    "l2_distance",
+    "squared_error",
+    "dawid_sebastiani",
+    "energy_score",
+    "variogram_score",
 ]
