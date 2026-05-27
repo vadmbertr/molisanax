@@ -1,22 +1,62 @@
-"""ODE and SDE solvers: Euler, Heun and RK4 with a unified lax.scan integration loop.
+"""ODE and SDE solvers with a unified lax.scan integration loop.
+
+Solver lineup
+-------------
+ODE solvers (both ``ode_step`` and ``sde_step``):
+
+- :class:`Euler`, :class:`Heun`, :class:`RK4` — first / second / fourth-order
+  explicit Runge–Kutta. ``sde_step`` interprets the term as a Stratonovich
+  predictor–corrector that reuses the same Wiener increment across stages.
+
+ODE-only solvers (raise on ``sde_step``):
+
+- :class:`Tsit5` — Tsitouras 5(4)6 explicit RK, order 5 (fixed-step).
+- :class:`Dopri5` — Dormand–Prince 5(4)7 explicit RK (FSAL), order 5
+  (fixed-step).
+
+SDE-only solvers (raise on ``ode_step``):
+
+- :class:`EulerHeun` — diffrax-style Stratonovich predictor–corrector
+  (diffusion-only predictor, Euler drift). Strong order 1.0.
+- :class:`ItoMilstein`, :class:`StratonovichMilstein` — diagonal-noise Milstein
+  schemes. Strong order 1.0. ``g`` must have shape ``(state_dim,)``; matrix
+  diffusion raises.
 
 Term API
 --------
-ODE term: ``f(t, y, args) -> Float[Array, "2"]``
-    Returns velocity [dlat/dt, dlon/dt] in degrees/second.
+ODE term: ``f(t, y, args) -> Float[Array, "2"]`` returns velocity
+[dlat/dt, dlon/dt] in degrees/second.
 
-SDE term: ``f(t, y, args, z) -> Float[Array, "2"]``
-    Receives the pre-sampled noise vector z and returns the full velocity.
-    The step is: dy = term(t, y, args, z) * dt.
-    All noise is drawn before integration begins.
+SDE term: ``f(t, y, args, z) -> tuple[Float[Array, "2"], Float[Array, "..."]]``
+returns ``(drift, g)``. ``drift`` is the deterministic velocity and ``g`` is
+the diffusion coefficient — the solver applies it as ``dy = drift*dt + g*dW``
+with ``dW = sqrt(|dt|) * z`` internally. Two ``g`` shapes are accepted:
 
-Mode detection is based on the call site: passing any of ``key``, ``noise``,
-or ``n_noise`` to ``solve()`` selects SDE mode.  If none are passed, ODE mode
-is assumed and the term is called without a noise argument.
+- ``g.shape == (2,)`` — diagonal noise, noise step is ``g * dW`` componentwise.
+- ``g.shape == (2, 2)`` — full 2×2 noise, noise step is ``g @ dW``.
 
-Backwards-in-time integration is supported transparently: pass a strictly
-decreasing ``ts`` (so ``dt = ts[1] - ts[0]`` is negative) and the same solvers
-step backwards.
+``n_noise`` is always 2 in either case. The Milstein solvers require the
+diagonal form.
+
+The term receives ``z`` so that nonlinear noise models (e.g. Mixture Density Networks, Flow-based Neural Networks)
+can be expressed: set ``g = jnp.zeros(2)`` and fold the noise contribution into
+``drift`` using ``z`` directly. The solver then evolves ``dy = drift*dt`` — a
+random-ODE step rather than a textbook SDE step. Textbook-SDE terms simply
+ignore ``z`` and return state-only ``(drift, g)``. ``ItoMilstein`` and
+``StratonovichMilstein`` assume ``g`` is the true state-only diffusion
+coefficient (their correction is computed from ``∂g/∂y``); they reduce to
+plain Euler-Maruyama when ``g == 0``.
+
+Noise convention
+----------------
+Per-step Wiener increment is ``dW = sqrt(|dt|) * z`` with ``z ~ N(0, 1)``
+pre-sampled before integration begins. Mode selection: passing any of ``key``,
+``noise``, or ``n_noise`` to :func:`solve` activates SDE mode.
+
+Backwards-in-time integration is supported transparently for ODE solvers:
+pass a strictly decreasing ``ts`` and the solvers step backwards. SDE
+backwards integration is not a textbook construction, but the formula is
+finite because we sign-abs the ``sqrt(dt)`` factor.
 """
 
 from __future__ import annotations
@@ -36,16 +76,34 @@ __all__ = [
     "Euler",
     "Heun",
     "RK4",
+    "Tsit5",
+    "Dopri5",
+    "EulerHeun",
+    "ItoMilstein",
+    "StratonovichMilstein",
     "solve",
 ]
+
+
+def _apply_g(
+    g: Float[Array, "..."],
+    dW: Float[Array, "n_noise"],
+) -> Float[Array, "2"]:
+    """Apply a diffusion coefficient to a Wiener increment.
+
+    Dispatches statically on ``g.ndim``: a 1-D ``g`` is a diagonal coefficient
+    multiplied componentwise; a 2-D ``g`` is a full ``(2, n_noise)`` matrix
+    contracted with ``dW``.
+    """
+    return g @ dW if g.ndim == 2 else g * dW
 
 
 class AbstractSolver(eqx.Module):
     """Abstract base class for fixed-step ODE/SDE solvers.
 
     Subclasses implement :meth:`ode_step` (deterministic) and :meth:`sde_step`
-    (stochastic, with pre-sampled noise). Both advance the state ``y`` by a
-    single step of size ``dt``.
+    (stochastic, with a pre-sampled ``z``). Solvers that are specific to one
+    mode raise :class:`NotImplementedError` from the other.
     """
 
     @abc.abstractmethod
@@ -80,19 +138,24 @@ class AbstractSolver(eqx.Module):
         y: Float[Array, "2"],
         dt: Float[Array, ""],
         args: PyTree,
-        z: Float[Array, " n_noise"],
+        z: Float[Array, "n_noise"],
     ) -> Float[Array, "2"]:
-        """Advance the SDE state by one step using pre-sampled noise.
+        """Advance the SDE state by one step using a pre-sampled ``z``.
 
         Args:
             term: Stochastic dynamics callable
-                ``f(t, y, args, z) -> Float[Array, "2"]`` returning the full
-                velocity (drift + noise contribution) in degrees per second.
+                ``f(t, y, args, z) -> (drift, g)``. ``drift`` is the
+                deterministic velocity in degrees per second; ``g`` is the
+                diffusion coefficient with shape ``(2,)`` (diagonal) or
+                ``(2, 2)`` (full). ``z`` is forwarded so nonlinear noise
+                models can use it inside ``drift`` (set ``g = 0`` and use
+                ``z`` directly for a random-ODE step).
             t: Current time, in seconds.
             y: Current state ``[lat, lon]`` in degrees.
             dt: Step size in seconds.
             args: Arbitrary pytree forwarded to ``term``.
-            z: Pre-sampled noise vector of shape ``(n_noise,)``.
+            z: Standard-normal noise sample of shape ``(n_noise,)``. The Wiener
+                increment used by the solver is ``dW = sqrt(|dt|) * z``.
 
         Returns:
             Updated state ``[lat, lon]`` in degrees after one step.
@@ -111,18 +174,7 @@ class Euler(AbstractSolver):
         dt: Float[Array, ""],
         args: PyTree,
     ) -> Float[Array, "2"]:
-        """One Euler step: ``y_new = y + term(t, y, args) * dt``.
-
-        Args:
-            term: ODE drift callable.
-            t: Current time, in seconds.
-            y: Current state ``[lat, lon]`` in degrees.
-            dt: Step size in seconds.
-            args: Arbitrary pytree forwarded to ``term``.
-
-        Returns:
-            Updated state after one Euler step.
-        """
+        """One Euler step: ``y_new = y + term(t, y, args) * dt``."""
         return y + term(t, y, args) * dt
 
     def sde_step(
@@ -132,30 +184,19 @@ class Euler(AbstractSolver):
         y: Float[Array, "2"],
         dt: Float[Array, ""],
         args: PyTree,
-        z: Float[Array, " n_noise"],
+        z: Float[Array, "n_noise"],
     ) -> Float[Array, "2"]:
-        """One Euler–Maruyama step: ``y_new = y + term(t, y, args, z) * dt``.
-
-        Args:
-            term: SDE dynamics callable returning the full velocity for the
-                given noise sample ``z``.
-            t: Current time, in seconds.
-            y: Current state ``[lat, lon]`` in degrees.
-            dt: Step size in seconds.
-            args: Arbitrary pytree forwarded to ``term``.
-            z: Pre-sampled noise vector of shape ``(n_noise,)``.
-
-        Returns:
-            Updated state after one Euler–Maruyama step.
-        """
-        return y + term(t, y, args, z) * dt
+        """One Euler–Maruyama step: ``y + drift*dt + g*dW``."""
+        f, g = term(t, y, args, z)
+        dW = jnp.sqrt(jnp.abs(dt)) * z
+        return y + f * dt + _apply_g(g, dW)
 
 
 class Heun(AbstractSolver):
     """Heun (explicit second-order, two-stage Runge–Kutta) solver.
 
-    Convergence order 2 in the ODE case; for SDEs with the same ``z`` reused
-    in the predictor and corrector, this is a Stratonovich-consistent scheme.
+    Convergence order 2 in the ODE case. The SDE step is a Stratonovich
+    predictor–corrector that reuses the same ``dW`` in both stages.
     """
 
     def ode_step(
@@ -166,18 +207,7 @@ class Heun(AbstractSolver):
         dt: Float[Array, ""],
         args: PyTree,
     ) -> Float[Array, "2"]:
-        """One Heun step using the predictor–corrector trapezoidal rule.
-
-        Args:
-            term: ODE drift callable.
-            t: Current time, in seconds.
-            y: Current state ``[lat, lon]`` in degrees.
-            dt: Step size in seconds.
-            args: Arbitrary pytree forwarded to ``term``.
-
-        Returns:
-            Updated state after one Heun step.
-        """
+        """One Heun (trapezoidal) step."""
         k1 = term(t, y, args)
         k2 = term(t + dt, y + k1 * dt, args)
         return y + 0.5 * (k1 + k2) * dt
@@ -189,39 +219,23 @@ class Heun(AbstractSolver):
         y: Float[Array, "2"],
         dt: Float[Array, ""],
         args: PyTree,
-        z: Float[Array, " n_noise"],
+        z: Float[Array, "n_noise"],
     ) -> Float[Array, "2"]:
-        """One stochastic Heun step (Stratonovich-consistent).
-
-        The same noise sample ``z`` is reused in the predictor and corrector
-        evaluations so the resulting scheme converges to the Stratonovich
-        interpretation of the SDE.
-
-        Args:
-            term: SDE dynamics callable returning the full velocity for the
-                given noise sample ``z``.
-            t: Current time, in seconds.
-            y: Current state ``[lat, lon]`` in degrees.
-            dt: Step size in seconds.
-            args: Arbitrary pytree forwarded to ``term``.
-            z: Pre-sampled noise vector of shape ``(n_noise,)``.
-
-        Returns:
-            Updated state after one stochastic Heun step.
-        """
-        k1 = term(t, y, args, z)
-        k2 = term(t + dt, y + k1 * dt, args, z)
-        return y + 0.5 * (k1 + k2) * dt
+        """One Stratonovich Heun step (same ``dW`` and ``z`` in predictor and corrector)."""
+        f0, g0 = term(t, y, args, z)
+        dW = jnp.sqrt(jnp.abs(dt)) * z
+        v0 = f0 * dt + _apply_g(g0, dW)
+        f1, g1 = term(t + dt, y + v0, args, z)
+        v1 = f1 * dt + _apply_g(g1, dW)
+        return y + 0.5 * (v0 + v1)
 
 
 class RK4(AbstractSolver):
     """Classical fourth-order Runge–Kutta solver (four stages, fixed-step).
 
-    Convergence order 4 in the ODE case. For SDEs, the same noise sample
-    ``z`` is reused in all four stages, yielding a Stratonovich-consistent
-    scheme whose strong order of convergence is limited by the noise
-    structure (typically order 0.5 for general multiplicative noise; higher
-    for additive noise).
+    Convergence order 4 in the ODE case. The SDE step reuses the same ``dW``
+    across all four stages, yielding a Stratonovich-consistent scheme whose
+    strong order is limited by the noise structure.
     """
 
     def ode_step(
@@ -232,18 +246,7 @@ class RK4(AbstractSolver):
         dt: Float[Array, ""],
         args: PyTree,
     ) -> Float[Array, "2"]:
-        """One classical RK4 step.
-
-        Args:
-            term: ODE drift callable.
-            t: Current time, in seconds.
-            y: Current state ``[lat, lon]`` in degrees.
-            dt: Step size in seconds.
-            args: Arbitrary pytree forwarded to ``term``.
-
-        Returns:
-            Updated state after one RK4 step.
-        """
+        """One classical RK4 step."""
         half = dt * 0.5
         k1 = term(t, y, args)
         k2 = term(t + half, y + k1 * half, args)
@@ -258,30 +261,315 @@ class RK4(AbstractSolver):
         y: Float[Array, "2"],
         dt: Float[Array, ""],
         args: PyTree,
-        z: Float[Array, " n_noise"],
+        z: Float[Array, "n_noise"],
     ) -> Float[Array, "2"]:
-        """One stochastic RK4 step (Stratonovich-consistent, single noise sample).
-
-        The same noise sample ``z`` is reused in all four stage evaluations.
-
-        Args:
-            term: SDE dynamics callable returning the full velocity for the
-                given noise sample ``z``.
-            t: Current time, in seconds.
-            y: Current state ``[lat, lon]`` in degrees.
-            dt: Step size in seconds.
-            args: Arbitrary pytree forwarded to ``term``.
-            z: Pre-sampled noise vector of shape ``(n_noise,)``.
-
-        Returns:
-            Updated state after one stochastic RK4 step.
-        """
+        """One stochastic RK4 step (Stratonovich, single ``dW`` and ``z`` across stages)."""
         half = dt * 0.5
-        k1 = term(t, y, args, z)
-        k2 = term(t + half, y + k1 * half, args, z)
-        k3 = term(t + half, y + k2 * half, args, z)
-        k4 = term(t + dt,   y + k3 * dt,   args, z)
-        return y + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        dW = jnp.sqrt(jnp.abs(dt)) * z
+
+        def velocity(t_, y_):
+            f_, g_ = term(t_, y_, args, z)
+            return f_ * dt + _apply_g(g_, dW)
+
+        v1 = velocity(t,        y)
+        v2 = velocity(t + half, y + v1 * 0.5)
+        v3 = velocity(t + half, y + v2 * 0.5)
+        v4 = velocity(t + dt,   y + v3)
+        return y + (v1 + 2.0 * v2 + 2.0 * v3 + v4) / 6.0
+
+
+# --- Tsit5 coefficients (Tsitouras 2011, RK5(4)6) ------------------------------
+# Source: Ch. Tsitouras, "Runge–Kutta pairs of order 5(4) satisfying only the
+# first column simplifying assumption", Comput. Math. Appl. 62 (2011), 770-775.
+# Same values used by DifferentialEquations.jl and diffrax.
+_TSIT5_A21 = 0.161
+_TSIT5_A31 = -0.008480655492356989
+_TSIT5_A32 = 0.335480655492357
+_TSIT5_A41 = 2.8971530571054935
+_TSIT5_A42 = -6.359448489975075
+_TSIT5_A43 = 4.3622954328695815
+_TSIT5_A51 = 5.325864828439257
+_TSIT5_A52 = -11.748883564062828
+_TSIT5_A53 = 7.4955393428898365
+_TSIT5_A54 = -0.09249506636175525
+_TSIT5_A61 = 5.86145544294642
+_TSIT5_A62 = -12.92096931784711
+_TSIT5_A63 = 8.159367898576159
+_TSIT5_A64 = -0.071584973281401
+_TSIT5_A65 = -0.028269050394068383
+
+_TSIT5_C2 = 0.161
+_TSIT5_C3 = 0.327
+_TSIT5_C4 = 0.9
+_TSIT5_C5 = 0.9800255409045097
+_TSIT5_C6 = 1.0
+
+_TSIT5_B1 = 0.09646076681806523
+_TSIT5_B2 = 0.01
+_TSIT5_B3 = 0.4798896504144996
+_TSIT5_B4 = 1.379008574103742
+_TSIT5_B5 = -3.290069515436081
+_TSIT5_B6 = 2.324710524099774
+
+
+class Tsit5(AbstractSolver):
+    """Tsitouras 5(4)6 explicit Runge–Kutta (ODE-only, fixed-step, order 5).
+
+    Six stages, no embedded error estimator (the 4th-order companion row of
+    Tsitouras 2011 is unused since we are fixed-step).
+    """
+
+    def ode_step(
+        self,
+        term: Callable,
+        t: Float[Array, ""],
+        y: Float[Array, "2"],
+        dt: Float[Array, ""],
+        args: PyTree,
+    ) -> Float[Array, "2"]:
+        """One Tsit5 step (5th-order weights only)."""
+        k1 = term(t, y, args)
+        k2 = term(t + _TSIT5_C2 * dt, y + dt * (_TSIT5_A21 * k1), args)
+        k3 = term(t + _TSIT5_C3 * dt, y + dt * (_TSIT5_A31 * k1 + _TSIT5_A32 * k2), args)
+        k4 = term(t + _TSIT5_C4 * dt, y + dt * (_TSIT5_A41 * k1 + _TSIT5_A42 * k2 + _TSIT5_A43 * k3), args)
+        k5 = term(t + _TSIT5_C5 * dt,
+                  y + dt * (_TSIT5_A51 * k1 + _TSIT5_A52 * k2 + _TSIT5_A53 * k3 + _TSIT5_A54 * k4),
+                  args)
+        k6 = term(t + _TSIT5_C6 * dt,
+                  y + dt * (_TSIT5_A61 * k1 + _TSIT5_A62 * k2 + _TSIT5_A63 * k3 + _TSIT5_A64 * k4 + _TSIT5_A65 * k5),
+                  args)
+        return y + dt * (
+            _TSIT5_B1 * k1 + _TSIT5_B2 * k2 + _TSIT5_B3 * k3
+            + _TSIT5_B4 * k4 + _TSIT5_B5 * k5 + _TSIT5_B6 * k6
+        )
+
+    def sde_step(
+        self,
+        term: Callable,
+        t: Float[Array, ""],
+        y: Float[Array, "2"],
+        dt: Float[Array, ""],
+        args: PyTree,
+        z: Float[Array, "n_noise"],
+    ) -> Float[Array, "2"]:
+        raise NotImplementedError(
+            "Tsit5 is an ODE-only solver; use Euler, Heun, RK4, EulerHeun, "
+            "ItoMilstein, or StratonovichMilstein for SDEs."
+        )
+
+
+class Dopri5(AbstractSolver):
+    """Dormand–Prince 5(4)7 explicit Runge–Kutta (ODE-only, fixed-step, order 5).
+
+    Seven stages with the first-same-as-last property; here we use the
+    5th-order row only.
+    """
+
+    def ode_step(
+        self,
+        term: Callable,
+        t: Float[Array, ""],
+        y: Float[Array, "2"],
+        dt: Float[Array, ""],
+        args: PyTree,
+    ) -> Float[Array, "2"]:
+        """One Dopri5 step (5th-order weights only)."""
+        k1 = term(t, y, args)
+        k2 = term(t + dt * (1.0 / 5.0), y + dt * (1.0 / 5.0) * k1, args)
+        k3 = term(t + dt * (3.0 / 10.0),
+                  y + dt * (3.0 / 40.0 * k1 + 9.0 / 40.0 * k2),
+                  args)
+        k4 = term(t + dt * (4.0 / 5.0),
+                  y + dt * (44.0 / 45.0 * k1 - 56.0 / 15.0 * k2 + 32.0 / 9.0 * k3),
+                  args)
+        k5 = term(t + dt * (8.0 / 9.0),
+                  y + dt * (
+                      19372.0 / 6561.0 * k1 - 25360.0 / 2187.0 * k2
+                      + 64448.0 / 6561.0 * k3 - 212.0 / 729.0 * k4
+                  ),
+                  args)
+        k6 = term(t + dt,
+                  y + dt * (
+                      9017.0 / 3168.0 * k1 - 355.0 / 33.0 * k2
+                      + 46732.0 / 5247.0 * k3 + 49.0 / 176.0 * k4
+                      - 5103.0 / 18656.0 * k5
+                  ),
+                  args)
+        return y + dt * (
+            35.0 / 384.0 * k1
+            + 500.0 / 1113.0 * k3
+            + 125.0 / 192.0 * k4
+            - 2187.0 / 6784.0 * k5
+            + 11.0 / 84.0 * k6
+        )
+
+    def sde_step(
+        self,
+        term: Callable,
+        t: Float[Array, ""],
+        y: Float[Array, "2"],
+        dt: Float[Array, ""],
+        args: PyTree,
+        z: Float[Array, "n_noise"],
+    ) -> Float[Array, "2"]:
+        raise NotImplementedError(
+            "Dopri5 is an ODE-only solver; use Euler, Heun, RK4, EulerHeun, "
+            "ItoMilstein, or StratonovichMilstein for SDEs."
+        )
+
+
+class EulerHeun(AbstractSolver):
+    """Stochastic Euler–Heun solver (SDE-only, Stratonovich, strong order 1.0).
+
+    Matches diffrax's ``EulerHeun`` algorithm: the predictor uses *diffusion
+    only* and the drift is applied once Euler-style. Accepts both diagonal
+    (``g.shape == (2,)``) and full (``g.shape == (2, 2)``) diffusion shapes.
+    """
+
+    def ode_step(
+        self,
+        term: Callable,
+        t: Float[Array, ""],
+        y: Float[Array, "2"],
+        dt: Float[Array, ""],
+        args: PyTree,
+    ) -> Float[Array, "2"]:
+        raise NotImplementedError(
+            "EulerHeun is an SDE-only solver; use Euler, Heun, RK4, Tsit5, "
+            "or Dopri5 for ODEs."
+        )
+
+    def sde_step(
+        self,
+        term: Callable,
+        t: Float[Array, ""],
+        y: Float[Array, "2"],
+        dt: Float[Array, ""],
+        args: PyTree,
+        z: Float[Array, "n_noise"],
+    ) -> Float[Array, "2"]:
+        """One stochastic Euler–Heun step."""
+        f0, g0 = term(t, y, args, z)
+        dW = jnp.sqrt(jnp.abs(dt)) * z
+        diff0 = _apply_g(g0, dW)
+        y_pred = y + diff0
+        _, g1 = term(t + dt, y_pred, args, z)
+        diff1 = _apply_g(g1, dW)
+        return y + f0 * dt + 0.5 * (diff0 + diff1)
+
+
+def _milstein_correction(
+    term: Callable,
+    t: Float[Array, ""],
+    y: Float[Array, "2"],
+    args: PyTree,
+    g: Float[Array, "2"],
+    dW: Float[Array, "n_noise"],
+    z: Float[Array, "n_noise"],
+) -> Float[Array, "2"]:
+    """Diagonal-noise Milstein cross-term ``0.5 * g * (∂g/∂y_i) * dW^2``.
+
+    Returns the ``0.5 * g * (∂g_i/∂y_i) * dW**2`` vector (Stratonovich form).
+    Itô subtracts ``0.5 * g * (∂g_i/∂y_i) * dt`` on top.
+
+    ``z`` is forwarded to ``term`` so nonlinear noise terms keep the same
+    signature; only ``g`` (which should be state-only) influences the
+    derivative computed via :func:`jax.jacfwd` here.
+    """
+    def g_fn(y_):
+        _, g_out = term(t, y_, args, z)
+        return g_out
+
+    dgdy = jax.jacfwd(g_fn)(y)            # (2, 2)
+    dgdy_diag = jnp.diag(dgdy)
+    return 0.5 * g * dgdy_diag * dW ** 2
+
+
+class ItoMilstein(AbstractSolver):
+    """Itô Milstein solver (SDE-only, diagonal noise, strong order 1.0).
+
+    Requires ``g.shape == (2,)``. Raises :class:`NotImplementedError` for
+    matrix-valued ``g`` — use :class:`EulerHeun` for general noise.
+    """
+
+    def ode_step(
+        self,
+        term: Callable,
+        t: Float[Array, ""],
+        y: Float[Array, "2"],
+        dt: Float[Array, ""],
+        args: PyTree,
+    ) -> Float[Array, "2"]:
+        raise NotImplementedError(
+            "ItoMilstein is an SDE-only solver; use Euler, Heun, RK4, Tsit5, "
+            "or Dopri5 for ODEs."
+        )
+
+    def sde_step(
+        self,
+        term: Callable,
+        t: Float[Array, ""],
+        y: Float[Array, "2"],
+        dt: Float[Array, ""],
+        args: PyTree,
+        z: Float[Array, "n_noise"],
+    ) -> Float[Array, "2"]:
+        """One Itô Milstein step: ``y + f*dt + g*dW + 0.5*g*(∂g/∂y)*(dW**2 - dt)``."""
+        f, g = term(t, y, args, z)
+        if g.ndim != 1:
+            raise NotImplementedError(
+                "ItoMilstein requires diagonal noise (g.shape == (2,)); "
+                f"got g.shape == {g.shape}. Use EulerHeun for matrix diffusion."
+            )
+        dW = jnp.sqrt(jnp.abs(dt)) * z
+        cross = _milstein_correction(term, t, y, args, g, dW, z)
+        def g_fn(y_):
+            _, g_out = term(t, y_, args, z)
+            return g_out
+        dgdy_diag = jnp.diag(jax.jacfwd(g_fn)(y))
+        ito_drift = -0.5 * g * dgdy_diag * dt
+        return y + f * dt + g * dW + cross + ito_drift
+
+
+class StratonovichMilstein(AbstractSolver):
+    """Stratonovich Milstein solver (SDE-only, diagonal noise, strong order 1.0).
+
+    Requires ``g.shape == (2,)``. Differs from :class:`ItoMilstein` by the
+    absence of the ``-0.5 * g * (∂g/∂y) * dt`` Itô-to-Stratonovich correction.
+    """
+
+    def ode_step(
+        self,
+        term: Callable,
+        t: Float[Array, ""],
+        y: Float[Array, "2"],
+        dt: Float[Array, ""],
+        args: PyTree,
+    ) -> Float[Array, "2"]:
+        raise NotImplementedError(
+            "StratonovichMilstein is an SDE-only solver; use Euler, Heun, RK4, "
+            "Tsit5, or Dopri5 for ODEs."
+        )
+
+    def sde_step(
+        self,
+        term: Callable,
+        t: Float[Array, ""],
+        y: Float[Array, "2"],
+        dt: Float[Array, ""],
+        args: PyTree,
+        z: Float[Array, "n_noise"],
+    ) -> Float[Array, "2"]:
+        """One Stratonovich Milstein step: ``y + f*dt + g*dW + 0.5*g*(∂g/∂y)*dW**2``."""
+        f, g = term(t, y, args, z)
+        if g.ndim != 1:
+            raise NotImplementedError(
+                "StratonovichMilstein requires diagonal noise (g.shape == (2,)); "
+                f"got g.shape == {g.shape}. Use EulerHeun for matrix diffusion."
+            )
+        dW = jnp.sqrt(jnp.abs(dt)) * z
+        cross = _milstein_correction(term, t, y, args, g, dW, z)
+        return y + f * dt + g * dW + cross
 
 
 def _run_ode(
@@ -347,9 +635,13 @@ def solve(
       ``term(t, y, args) -> Float[Array, "2"]`` returns velocity.
 
     - **SDE**: at least one of ``key``, ``noise``, or ``n_noise`` is passed.
-      ``term(t, y, args, z) -> Float[Array, "2"]`` receives the pre-sampled
-      noise vector ``z`` of shape ``(n_noise,)`` and returns the full velocity.
-      The step is ``dy = term(t, y, args, z) * dt``.
+      ``term(t, y, args, z) -> (drift, g)`` where ``drift`` is the
+      deterministic velocity and ``g`` is the diffusion coefficient.
+      ``g`` may be diagonal (shape ``(2,)``) or a full matrix (shape
+      ``(2, 2)``). The solver applies ``dW = sqrt(|dt|) * z`` internally.
+      Nonlinear noise models (e.g. an MDN-style residual) can be expressed by
+      using ``z`` inside ``drift`` and returning ``g = jnp.zeros(2)``; the
+      solver then evolves ``dy = drift*dt`` — a random-ODE step.
 
     Noise for SDE mode can be supplied in two ways:
 
@@ -358,21 +650,24 @@ def solve(
        - Shape ``(S, n_steps, n_noise)`` → ensemble, returns ``(S, T, 2)``.
        ``key`` and ``n_noise`` are not needed when ``noise`` is provided.
 
-    2. **Auto-sampled**: pass ``key`` and ``n_noise`` (and optionally ``n_samples``).
-       A single ``jax.random.normal`` call draws the full
+    2. **Auto-sampled**: pass ``key`` and ``n_noise`` (and optionally
+       ``n_samples``). A single ``jax.random.normal`` call draws the full
        ``(n_samples, n_steps, n_noise)`` array before vmap and scan.
 
     Args:
-        term: Dynamics callable. ODE: ``f(t, y, args)``. SDE: ``f(t, y, args, z)``.
+        term: Dynamics callable. ODE: ``f(t, y, args)``. SDE:
+            ``f(t, y, args, z)`` returning ``(drift, g)``.
         args: Arbitrary JAX pytree passed through to term (e.g. a Dataset).
         y0: Initial state [lat, lon] in degrees, shape (2,).
         ts: Equally spaced output times in seconds, shape (T,).
         solver: Solver instance. Defaults to Heun().
         key: PRNG key for auto-sampling noise (SDE only). Required when ``noise``
-            is None in SDE mode.
-        n_samples: Number of realisations for auto-sampled SDE. Defaults to 1.
+            is None and ``n_noise`` is provided.
+        n_samples: Number of realisations for auto-sampled SDE. Defaults to 1 when
+            ``n_noise`` is provided.
         n_noise: Dimension of the noise vector ``z``. Required for auto-sampling;
             inferred from ``noise.shape[-1]`` when pre-sampled noise is provided.
+            For the current solver lineup this is always 2.
         noise: Pre-sampled noise array of shape ``(n_steps, n_noise)`` (single) or
             ``(S, n_steps, n_noise)`` (ensemble). When provided, ``key`` and
             ``n_noise`` are not used.

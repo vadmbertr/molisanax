@@ -12,7 +12,7 @@
 - A-grid and NEMO-convention Arakawa C-grid forcing layouts (`Dataset.from_arrays_cgrid` / `from_xarray_cgrid`)
 - Coastal robustness on A-grid: NaN-inferred land masks, inverse-distance partial-cell bilinear, and an opt-in partial-slip scheme via `Dataset.velocity_interp`
 - Unified `solve()` function — ODE/SDE mode selected by caller (no introspection)
-- Euler, Heun and RK4 solvers; SDE term receives noise vector `z` directly for full flexibility
+- ODE solvers: Euler, Heun, RK4, Tsit5, Dopri5. SDE solvers: Euler-Maruyama / Stratonovich Heun / Stratonovich RK4 via the ODE classes, plus dedicated EulerHeun, ItoMilstein, and StratonovichMilstein. SDE term has signature `term(t, y, args, z) -> (drift, g)`; the solver applies `dW = sqrt(dt) * z` internally, and nonlinear noise models can route `z` through `drift` directly
 - Forward or backwards-in-time integration (pass an increasing or decreasing `ts`)
 - Geographic unit conversions (metres ↔ degrees)
 - Along-trajectory metrics with optional ensemble (vmap) mode
@@ -67,11 +67,16 @@ trajectory = solve(my_term, dataset, y0, ts, Heun())
 ### SDE simulation (stochastic ensemble)
 
 SDE mode is activated by passing `key`, `noise`, or `n_noise` to `solve()`.
-The term receives the pre-sampled noise vector `z` as a fourth argument and
-returns the full velocity — no `(f, g)` decomposition is imposed.
+The term signature is `term(t, y, args, z) -> (drift, g)`: `drift` is the
+deterministic velocity, `g` is the diffusion coefficient, and `z` is the
+per-step standard-normal noise sample. The solver builds the Wiener
+increment as `dW = sqrt(dt) * z` and applies it internally as `dy = drift*dt + g*dW`.
+`g` may be either diagonal (shape `(2,)`, applied componentwise) or a full
+matrix (shape `(2, n_noise)`, applied as `g @ dW`).
 
 ```python
 import jax.random as jr
+from molisanax import EulerHeun
 
 def my_term(t, y, args, z):
     dataset = args
@@ -79,25 +84,52 @@ def my_term(t, y, args, z):
     u = dataset["u"].interp(t, lat, lon)
     v = dataset["v"].interp(t, lat, lon)
     drift = meters_to_degrees(jnp.array([v, u]), lat)
-    noise_amplitude = jnp.full(2, 1e-5)   # deg/s noise scale per component
-    return drift + noise_amplitude * z
+    g     = jnp.full(2, 1e-5)            # diagonal diffusion, deg / sqrt(s)
+    return drift, g                       # textbook SDE — z unused here
 
 key = jr.key(0)
 
-# Single stochastic trajectory (z has dimension 2)
-traj = solve(my_term, dataset, y0, ts, key=key, n_noise=2)
+# Single stochastic trajectory with the Stratonovich Euler-Heun solver
+traj = solve(my_term, dataset, y0, ts, EulerHeun(), key=key, n_noise=2)
 # shape (121, 2)
 
 # Ensemble of 100 independent realisations
-ensemble = solve(my_term, dataset, y0, ts, key=key, n_noise=2, n_samples=100)
+ensemble = solve(my_term, dataset, y0, ts, EulerHeun(),
+                 key=key, n_noise=2, n_samples=100)
 # shape (100, 121, 2)
 
 # Pre-sampled noise (reproducible; n_noise inferred from noise.shape[-1])
 n_steps = ts.shape[0] - 1
 noise = jr.normal(key, shape=(n_steps, 2))
-traj = solve(my_term, dataset, y0, ts, noise=noise)
+traj = solve(my_term, dataset, y0, ts, EulerHeun(), noise=noise)
 # shape (121, 2)
 ```
+
+The `Euler`, `Heun`, and `RK4` solvers also accept SDE mode (Euler-Maruyama,
+Stratonovich Heun, Stratonovich RK4). For diagonal noise specifically, the
+`ItoMilstein` and `StratonovichMilstein` solvers give strong order 1.0 by
+adding the Milstein cross-term computed via `jax.jacfwd` over the term's
+`g`. They raise `NotImplementedError` if `g` is matrix-valued.
+
+#### Nonlinear noise (random-ODE / MDN-style residuals)
+
+If the noise enters nonlinearly — e.g. a mixture density network mapping
+`(y, z) → residual_velocity` — express it inside `drift` (which has `z`
+available) and return a zero `g` of the right shape. The solver then evolves
+`dy = drift*dt` and the textbook `g*dW` path is bypassed.
+
+```python
+def mdn_term(t, y, args, z):                  # z has shape (n_noise,)
+    drift = base_velocity(t, y) + mdn(y, z)   # nonlinear in z
+    return drift, jnp.zeros((2, z.shape[0]))  # opt out of g*dW
+
+ensemble = solve(mdn_term, dataset, y0, ts, EulerHeun(),
+                 key=jr.key(0), n_noise=16, n_samples=64)
+```
+
+`ItoMilstein` and `StratonovichMilstein` assume `g` is the true state-only
+diffusion coefficient (their correction comes from `∂g/∂y`), so they reduce
+to plain Euler-Maruyama on the `drift` when `g == 0`.
 
 ### Loading forcing fields from xarray
 
@@ -246,7 +278,7 @@ disp_deg = meters_to_degrees(disp_m, lat_ref)   # [dlat, dlon] degrees
 
 ### Backwards-in-time integration
 
-Pass a strictly decreasing `ts` to integrate backwards. All solvers (`Euler`, `Heun`, `RK4`) handle this transparently because `dt = ts[1] - ts[0]` becomes negative:
+Pass a strictly decreasing `ts` to integrate backwards. All ODE solvers (`Euler`, `Heun`, `RK4`, `Tsit5`, `Dopri5`) handle this transparently because `dt = ts[1] - ts[0]` becomes negative:
 
 ```python
 y0_end = jnp.array([48.0, -4.0])
@@ -318,7 +350,7 @@ The full API reference — every public symbol, signature, and docstring — liv
 
 ## Design
 
-No diffrax or interpax dependency. The integration loop uses `jax.lax.scan` with `jax.checkpoint` on the body for memory-efficient reverse-mode AD. ODE/SDE mode is detected by probing the term with `jax.eval_shape` before entering jit.
+No diffrax or interpax dependency. The integration loop uses `jax.lax.scan` with `jax.checkpoint` on the body for memory-efficient reverse-mode AD. ODE/SDE mode is selected by the caller — passing any of `key`, `noise`, or `n_noise` to `solve()` activates SDE mode.
 
 ## Running Tests
 
@@ -335,4 +367,4 @@ pytest -q
 
 ## License
 
-MIT
+Apache-2.0

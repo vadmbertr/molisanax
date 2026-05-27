@@ -17,7 +17,17 @@ from .score import (
     squared_error,
     variogram_score,
 )
-from .solver import RK4, Euler, Heun, solve
+from .solver import (
+    RK4,
+    Dopri5,
+    Euler,
+    EulerHeun,
+    Heun,
+    ItoMilstein,
+    StratonovichMilstein,
+    Tsit5,
+    solve,
+)
 
 __version__ = "0.1.0"
 
@@ -43,6 +53,11 @@ __all__ = [
     "Euler",
     "Heun",
     "RK4",
+    "Tsit5",
+    "Dopri5",
+    "EulerHeun",
+    "ItoMilstein",
+    "StratonovichMilstein",
     "solve",
     # metric
     "separation_distance",
