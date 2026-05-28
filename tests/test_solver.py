@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from molisanax.solver import (
+from pastax.solver import (
     RK4,
     Dopri5,
     Euler,

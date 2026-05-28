@@ -1,44 +1,42 @@
-# molisanax
+# pastax
 
-**Differentiable Lagrangian simulator for ocean surface trajectories, implemented in JAX/Equinox.**
+**P**arameterizable **A**uto-differentiable **S**imulators for ocean surface **T**rajectories in j**AX**.
 
-`molisanax` integrates particle trajectories on the ocean surface by solving ODEs and SDEs over user-supplied forcing fields (e.g. surface currents). Every computation is fully differentiable via JAX automatic differentiation — both forward-mode (`jax.jvp`) and reverse-mode (`jax.grad`) are supported.
+`pastax` integrates particle trajectories on the ocean surface by solving ODEs and SDEs over user-supplied forcing fields (e.g. surface currents). Every computation is fully differentiable via JAX automatic differentiation — both forward-mode (`jax.jvp`) and reverse-mode (`jax.grad`) are supported.
 
-📖 **Documentation:** <https://vadmbertr.github.io/molisanax/> — full API reference and a runnable [tutorial notebook](docs/tutorial.ipynb).
+📖 **Documentation:** <https://vadmbertr.github.io/pastax/> — full API reference and a runnable [tutorial notebook](docs/tutorial.ipynb).
 
 ## Project Status
 
-- Bilinear interpolation of rectilinear forcing fields, with neighbourhood extraction
+- Bilinear interpolation of rectilinear forcing fields, with neighbourhood  cube extraction
 - A-grid and NEMO-convention Arakawa C-grid forcing layouts (`Dataset.from_arrays_cgrid` / `from_xarray_cgrid`)
 - Coastal robustness on A-grid: NaN-inferred land masks, inverse-distance partial-cell bilinear, and an opt-in partial-slip scheme via `Dataset.velocity_interp`
-- Unified `solve()` function — ODE/SDE mode selected by caller (no introspection)
-- ODE solvers: Euler, Heun, RK4, Tsit5, Dopri5. SDE solvers: Euler-Maruyama / Stratonovich Heun / Stratonovich RK4 via the ODE classes, plus dedicated EulerHeun, ItoMilstein, and StratonovichMilstein. SDE term has signature `term(t, y, args, z) -> (drift, g)`; the solver applies `dW = sqrt(dt) * z` internally, and nonlinear noise models can route `z` through `drift` directly
+- Unified `solve()` function — ODE/SDE mode selected by caller
+- ODE solvers: Euler, Heun, RK4, Tsit5, Dopri5. SDE solvers: Euler-Maruyama, Stratonovich Heun, Stratonovich RK4 via the ODE classes, plus dedicated EulerHeun, ItoMilstein, and StratonovichMilstein. SDE term has signature `term(t, y, args, z) -> (drift, g)`; the solver applies `dW = sqrt(dt) * z` internally, and nonlinear noise models can route `z` through `drift` directly
 - Forward or backwards-in-time integration (pass an increasing or decreasing `ts`)
 - Geographic unit conversions (metres ↔ degrees)
 - Along-trajectory metrics with optional ensemble (vmap) mode
-- (Proper) Scoring rules to evaluate stochastic simulators
-- xarray (zarr/netCDF) dataset loading; also `Dataset.from_arrays` for plain numpy/JAX arrays
-
-See [`docs/project_status.md`](docs/project_status.md) for current capabilities and known limitations.
+- (Proper) Scoring rules to evaluate and train stochastic simulators
+- xarray (zarr/netCDF) dataset loading
 
 ## Installation
 
-From Git;
+From Git:
 
 ```bash
-pip install git+https://github.com/vadmbertr/molisanax             # core (JAX, Equinox, jaxtyping)
-pip install "git+https://github.com/vadmbertr/molisanax[forcing]"  # + xarray, zarr, netCDF4
+pip install git+https://github.com/vadmbertr/pastax             # core (JAX, Equinox, jaxtyping)
+pip install "git+https://github.com/vadmbertr/pastax[forcing]"  # + xarray, zarr, netCDF4
 ```
 
 From source:
 
 ```bash
-git clone https://github.com/vadmbertr/molisanax
-cd molisanax
+git clone https://github.com/vadmbertr/pastax
+cd pastax
 pip install -e ".[dev]"
 ```
 
-Installing a JAX **GPU version** should be done prior to installing `molisanax`, following [https://docs.jax.dev/en/latest/installation.html](https://docs.jax.dev/en/latest/installation.html).
+Installing a JAX **GPU version** should be done prior to installing `pastax`, following [https://docs.jax.dev/en/latest/installation.html](https://docs.jax.dev/en/latest/installation.html).
 
 ## Quick Start
 
@@ -48,7 +46,7 @@ A term returns a single velocity array — `solve()` detects ODE mode automatica
 
 ```python
 import jax.numpy as jnp
-from molisanax import solve, Heun, meters_to_degrees
+from pastax import solve, Heun, meters_to_degrees
 
 def my_term(t, y, args):
     dataset = args
@@ -76,7 +74,7 @@ matrix (shape `(2, n_noise)`, applied as `g @ dW`).
 
 ```python
 import jax.random as jr
-from molisanax import EulerHeun
+from pastax import EulerHeun
 
 def my_term(t, y, args, z):
     dataset = args
@@ -85,7 +83,7 @@ def my_term(t, y, args, z):
     v = dataset["v"].interp(t, lat, lon)
     drift = meters_to_degrees(jnp.array([v, u]), lat)
     g     = jnp.full(2, 1e-5)            # diagonal diffusion, deg / sqrt(s)
-    return drift, g                       # textbook SDE — z unused here
+    return drift, g                      # textbook SDE — z unused here
 
 key = jr.key(0)
 
@@ -135,7 +133,7 @@ to plain Euler-Maruyama on the `drift` when `g == 0`.
 
 ```python
 import xarray as xr
-from molisanax import Dataset
+from pastax import Dataset
 
 ds = xr.open_zarr("path/to/currents.zarr")
 dataset = Dataset.from_xarray(
@@ -166,7 +164,7 @@ For data on an Arakawa C-grid, U lives on the east faces of the centre cells
 coordinates as half-cell shifts of the centre grid:
 
 ```python
-from molisanax import Dataset
+from pastax import Dataset
 
 dataset = Dataset.from_arrays_cgrid(
     t, center_lat, center_lon,
@@ -269,7 +267,7 @@ patches = dataset.neighborhood(t, lat, lon, lat_window=1, lon_window=1)
 ### Geographic conversions
 
 ```python
-from molisanax import meters_to_degrees, degrees_to_meters
+from pastax import meters_to_degrees, degrees_to_meters
 
 disp_m = jnp.array([1000.0, 500.0])  # [north, east] metres
 lat_ref = jnp.array(45.0)
@@ -302,7 +300,7 @@ traj, tangent = jax.jvp(lambda y0: solve(my_ode_term, dataset, y0, ts), (y0,), (
 ### Trajectory metrics
 
 ```python
-from molisanax import separation_distance, normalized_separation_distance, liu_index
+from pastax import separation_distance, normalized_separation_distance, liu_index
 
 # Single-trajectory metrics
 sep = separation_distance(trajectory, reference)          # (T,), metres
@@ -317,7 +315,7 @@ li_ens  = liu_index(ensemble, reference, ensemble=True)            # (S, T)
 ### (Proper) Scoring rules
 
 ```python
-from molisanax import dawid_sebastiani, energy_score, squared_error, variogram_score
+from pastax import dawid_sebastiani, energy_score, squared_error, variogram_score
 
 # Along trajectory scores
 ds_ts = dawid_sebastiani(ens, ref, reduce=None)  # (T,)
@@ -337,7 +335,7 @@ es_agg = energy_score(ens, ref, reduce="sum")  # scalar
 se_agg = squared_error(ens, ref, reduce="sum")  # scalar
 vs_agg = variogram_score(ens, ref, reduce="sum")  # scalar
 
-from molisanax import haversine
+from pastax import haversine
 
 # Custom score kernel (relevant for the energy score and the square error only)
 es_agg = energy_score(ens, ref, kernel=haversine)
@@ -346,24 +344,14 @@ se_agg = squared_error(ens, ref, kernel=haversine)
 
 ## API Reference
 
-The full API reference — every public symbol, signature, and docstring — lives on the documentation site: <https://vadmbertr.github.io/molisanax/api>.
-
-## Design
-
-No diffrax or interpax dependency. The integration loop uses `jax.lax.scan` with `jax.checkpoint` on the body for memory-efficient reverse-mode AD. ODE/SDE mode is selected by the caller — passing any of `key`, `noise`, or `n_noise` to `solve()` activates SDE mode.
-
-## Running Tests
-
-```bash
-pytest -q
-```
+The full API reference — every public symbol, signature, and docstring — lives on the documentation site: <https://vadmbertr.github.io/pastax/api>.
 
 ## Dependencies
 
 - [JAX](https://github.com/google/jax) ≥ 0.4.30
 - [Equinox](https://github.com/patrick-kidger/equinox) ≥ 0.11.0
 - [jaxtyping](https://github.com/patrick-kidger/jaxtyping) ≥ 0.2.30
-- xarray, zarr, netCDF4 (optional, for forcing loading)
+- xarray, Zarr, netCDF4 (optional, for forcing loading)
 
 ## License
 

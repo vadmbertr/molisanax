@@ -1,7 +1,7 @@
-`molisanax.geo`
+`pastax.geo`
 ===============
 
-.. automodule:: molisanax.geo
+.. automodule:: pastax.geo
    :members:
    :undoc-members:
    :show-inheritance:

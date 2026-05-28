@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from molisanax import Heun, solve
-from molisanax.forcing import Dataset, Field
-from molisanax.grid import Grid
+from pastax import Heun, solve
+from pastax.forcing import Dataset, Field
+from pastax.grid import Grid
 
 
 def make_synthetic_ds():

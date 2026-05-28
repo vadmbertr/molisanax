@@ -3,7 +3,7 @@
 import jax.numpy as jnp
 import pytest
 
-from molisanax import Dataset, Field, Grid
+from pastax import Dataset, Field, Grid
 
 
 def _centre_grid():

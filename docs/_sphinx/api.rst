@@ -1,4 +1,4 @@
-molisanax
+pastax
 =========
 
 Public API surface — every exported function and class, generated from
@@ -14,9 +14,9 @@ the source by ``sphinx.ext.autodoc`` with Google-style docstrings.
    metric
    score
 
-* :doc:`molisanax.solver <solver>`
-* :doc:`molisanax.forcing <forcing>`
-* :doc:`molisanax.geo <geo>`
-* :doc:`molisanax.interpolation <interpolation>`
-* :doc:`molisanax.metric <metric>`
-* :doc:`molisanax.score <score>`
+* :doc:`pastax.solver <solver>`
+* :doc:`pastax.forcing <forcing>`
+* :doc:`pastax.geo <geo>`
+* :doc:`pastax.interpolation <interpolation>`
+* :doc:`pastax.metric <metric>`
+* :doc:`pastax.score <score>`

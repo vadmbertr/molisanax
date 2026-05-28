@@ -4,8 +4,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from molisanax.geo import haversine
-from molisanax.score import (
+from pastax.geo import haversine
+from pastax.score import (
     dawid_sebastiani,
     energy_score,
     l2_distance,

@@ -2,7 +2,7 @@
 
 The :class:`Grid` object describes the *centre* (tracer) coordinates of a
 forcing dataset together with its stagger type. It is held as metadata on
-:class:`molisanax.Dataset` and acts as a coordinate-derivation helper for
+:class:`pastax.Dataset` and acts as a coordinate-derivation helper for
 C-grid loaders.
 
 Interpolation on a C-grid is performed locally by each :class:`Field` using

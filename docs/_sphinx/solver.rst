@@ -1,7 +1,7 @@
-`molisanax.solver`
+`pastax.solver`
 ==================
 
-.. automodule:: molisanax.solver
+.. automodule:: pastax.solver
    :members:
    :undoc-members:
    :show-inheritance:

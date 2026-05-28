@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from molisanax._safe_math import safe_divide, safe_log, safe_sqrt
+from pastax._safe_math import safe_divide, safe_log, safe_sqrt
 
 
 class TestSafeSqrt:

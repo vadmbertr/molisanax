@@ -1,7 +1,7 @@
-`molisanax.forcing`
+`pastax.forcing`
 ===================
 
-.. automodule:: molisanax.forcing
+.. automodule:: pastax.forcing
    :members:
    :undoc-members:
    :show-inheritance:

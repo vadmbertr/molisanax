@@ -1,4 +1,4 @@
-/* mystmd book-theme overrides for the molisanax docs site. */
+/* mystmd book-theme overrides for the pastax docs site. */
 
 /*
  * Wrap long Python signatures inside the API reference.
@@ -9,7 +9,7 @@
  * etc.) — not <pre>/<code>. By default the styling treats them as
  * pre-formatted monospace, so a long signature like
  *
- *   class molisanax.forcing.Field(values: Float[Array, 'time lat lon'],
+ *   class pastax.forcing.Field(values: Float[Array, 'time lat lon'],
  *                                 t_coords: Float[Array, 'time'], ...)
  *
  * stays on a single line and the page grows a horizontal scrollbar.

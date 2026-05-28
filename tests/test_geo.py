@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from molisanax.geo import (
+from pastax.geo import (
     EARTH_RADIUS,
     degrees_to_meters,
     haversine,

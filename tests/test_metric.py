@@ -4,8 +4,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from molisanax.geo import EARTH_RADIUS
-from molisanax.metric import liu_index, normalized_separation_distance, separation_distance
+from pastax.geo import EARTH_RADIUS
+from pastax.metric import liu_index, normalized_separation_distance, separation_distance
 
 
 class TestSeparationDistance:

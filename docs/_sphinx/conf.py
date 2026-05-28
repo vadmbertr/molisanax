@@ -1,4 +1,4 @@
-"""Sphinx project that builds the molisanax API reference and emits it as a
+"""Sphinx project that builds the pastax API reference and emits it as a
 MyST-MD AST (``*.myst.json``) consumable by mystmd's TOC ``pattern:`` entry.
 
 Build with::
@@ -12,7 +12,7 @@ the documentation.
 
 from __future__ import annotations
 
-project = "molisanax"
+project = "pastax"
 author = "Vadim Bertrand"
 
 extensions = [

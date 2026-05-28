@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from molisanax import Dataset, Heun, solve
+from pastax import Dataset, Heun, solve
 
 
 def _agrid_dataset(*, u_const=0.1, v_const=0.0, with_mask=False, land_row=True):

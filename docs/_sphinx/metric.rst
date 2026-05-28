@@ -1,7 +1,7 @@
-`molisanax.metric`
+`pastax.metric`
 ===================
 
-.. automodule:: molisanax.metric
+.. automodule:: pastax.metric
    :members:
    :undoc-members:
    :show-inheritance:

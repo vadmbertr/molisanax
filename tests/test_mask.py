@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from molisanax import Dataset, Field
+from pastax import Dataset, Field
 
 
 def test_field_mask_defaults_to_none():
@@ -445,7 +445,7 @@ class TestAlongshoreJetNoStuckParticle:
     """
 
     def _dataset(self, with_mask: bool):
-        from molisanax import Dataset
+        from pastax import Dataset
         nlat, nlon, nt = 5, 10, 2
         lat = np.linspace(0.0, 4.0, nlat).astype(np.float32)
         lon = np.linspace(0.0, 9.0, nlon).astype(np.float32)
@@ -473,7 +473,7 @@ class TestAlongshoreJetNoStuckParticle:
         return term
 
     def test_unmasked_particle_gets_stuck_near_coast(self):
-        from molisanax import Heun, solve
+        from pastax import Heun, solve
         ds = self._dataset(with_mask=False)
         ts = jnp.linspace(0.0, 5.0, 11)  # 5 seconds
         y0 = jnp.array([0.1, 0.5], dtype=jnp.float32)  # just above coast
@@ -484,7 +484,7 @@ class TestAlongshoreJetNoStuckParticle:
         assert dlon_unmasked < 0.10  # well under the full 0.5 deg eastward
 
     def test_masked_particle_slides_along_coast(self):
-        from molisanax import Heun, solve
+        from pastax import Heun, solve
         ds = self._dataset(with_mask=True)
         ts = jnp.linspace(0.0, 5.0, 11)
         y0 = jnp.array([0.1, 0.5], dtype=jnp.float32)
@@ -502,8 +502,8 @@ class TestClosedBay:
     zero velocity (not NaN) and stay put."""
 
     def test_closed_bay_zero_velocity(self):
-        from molisanax import Heun, solve
-        from molisanax import Dataset
+        from pastax import Heun, solve
+        from pastax import Dataset
         nlat, nlon, nt = 5, 5, 2
         lat = np.linspace(0.0, 4.0, nlat).astype(np.float32)
         lon = np.linspace(0.0, 4.0, nlon).astype(np.float32)

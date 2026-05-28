@@ -115,7 +115,7 @@ class Field(eqx.Module):
             instead of extrapolating. When ``self.mask`` is set, coastal
             cells use inverse-distance partial-cell weighting and fully
             land-bound cells return ``0`` (see
-            :func:`molisanax.interpolation.bilinear_interp_2d`).
+            :func:`pastax.interpolation.bilinear_interp_2d`).
         """
         return spatiotemporal_interp(
             self.values, self.t_coords, self.lat_coords, self.lon_coords,

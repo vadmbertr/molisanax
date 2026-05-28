@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from molisanax.interpolation import (
+from pastax.interpolation import (
     _index_and_weight,
     bilinear_interp_2d,
     linear_interp_1d,

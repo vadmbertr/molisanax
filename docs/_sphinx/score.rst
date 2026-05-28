@@ -1,7 +1,7 @@
-`molisanax.score`
+`pastax.score`
 ===================
 
-.. automodule:: molisanax.score
+.. automodule:: pastax.score
    :members:
    :undoc-members:
    :show-inheritance:

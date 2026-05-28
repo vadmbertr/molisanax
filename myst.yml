@@ -1,10 +1,10 @@
 # See https://mystmd.org/guide/frontmatter
 version: 1
 project:
-  title: molisanax
+  title: pastax
   description: Differentiable Lagrangian simulator for ocean surface trajectories (JAX/Equinox).
-  github: https://github.com/vadmbertr/molisanax
-  license: MIT
+  github: https://github.com/vadmbertr/pastax
+  license: Apache-2.0
   authors:
     - name: Vadim Bertrand
       github: vadmbertr
@@ -26,5 +26,6 @@ project:
 site:
   template: book-theme
   options:
-    logo_text: molisanax
+    logo: docs/_static/pastax-logo.png
+    favicon: docs/_static/pastax-logo.png
     style: docs/_static/myst-extra.css

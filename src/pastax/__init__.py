@@ -1,4 +1,4 @@
-"""molisanax: Differentiable Lagrangian simulator for ocean surface trajectories."""
+"""pastax: Differentiable Lagrangian simulator for ocean surface trajectories."""
 
 from ._safe_math import safe_divide, safe_log, safe_sqrt
 from .forcing import Dataset, Field
