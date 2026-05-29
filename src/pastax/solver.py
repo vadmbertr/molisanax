@@ -24,15 +24,10 @@ SDE-only solvers (raise on ``ode_step``):
 
 Term API
 --------
-ODE term: ``f(t, y, args) -> Float[Array, "2"]`` returns velocity
+ODE term: ``f(t, y, args[, ctrl]) -> Float[Array, "2"]`` returns velocity
 [dlat/dt, dlon/dt] in degrees/second.
 
-ODE term with controls: ``f(t, y, args, ctrl) -> Float[Array, "2"]``. Per-step
-controls are passed via the ``controls`` argument of :func:`solve`; the solver
-slices them at each integration step and forwards the slice to the term. The
-term owns all interpretation and scaling of the controls slice.
-
-SDE term: ``f(t, y, args) -> tuple[Float[Array, "2"], Float[Array, "..."]]``
+SDE term: ``f(t, y, args[, ctrl]) -> tuple[Float[Array, "2"], Float[Array, "..."]]``
 returns ``(drift, g)``. ``drift`` is the deterministic velocity and ``g`` is
 the diffusion coefficient — the solver applies it as ``dy = drift*dt + g*dW``
 with ``dW = sqrt(|dt|) * z`` and ``z ~ N(0, I_2)`` drawn internally. The term
@@ -43,9 +38,9 @@ never receives ``z``. Two ``g`` shapes are accepted:
 
 The Milstein solvers require the diagonal form.
 
-SDE term with controls: ``f(t, y, args, ctrl) -> tuple[Float[Array, "2"], Float[Array, "..."]]``.
-Combines per-step external inputs with stochastic diffusion; the solver still
-draws ``z`` and applies ``dW`` internally.
+The optional ``ctrl`` argument is present when ``controls`` is passed to
+:func:`solve`; the solver slices ``controls[i]`` at each step and forwards it
+to the term. The term owns all interpretation and scaling of the slice.
 
 Noise convention
 ----------------
@@ -646,39 +641,24 @@ def solve(
 ) -> Array:
     """Integrate a trajectory for ``n_save`` output intervals starting at ``t0``.
 
-    Mode is selected by the caller:
-
-    - **ODE** (default): ``term(t, y, args) -> Float[Array, "2"]`` returns velocity.
-
-    - **ODE with controls**: ``term(t, y, args, ctrl) -> Float[Array, "2"]``. Pass
-      ``controls`` as a pytree whose leading axis has length ``n_fine``; the solver
-      slices ``controls[i]`` at each step and passes it as the 4th argument to the
-      term. The term owns all interpretation and scaling of the controls.
-
-    - **SDE**: pass ``key``. ``term(t, y, args) -> (drift, g)`` where ``drift`` is
-      the deterministic velocity and ``g`` is the diffusion coefficient (diagonal
-      shape ``(2,)`` or full matrix ``(2, 2)``). The solver draws ``z ~ N(0, I_2)``
-      and applies ``dW = sqrt(|int_dt|) * z`` internally; the term never sees ``z``.
-
-    - **SDE with controls**: pass both ``key`` and ``controls``.
-      ``term(t, y, args, ctrl) -> (drift, g)``. Per-step controls are sliced and
-      forwarded exactly as in ODE+controls mode; the solver still owns ``z`` and
-      ``dW``.
+    ODE mode (default, no ``key``): ``term(t, y, args[, ctrl])`` returns velocity.
+    SDE mode (pass ``key``): ``term(t, y, args[, ctrl])`` returns ``(drift, g)``;
+    the solver draws ``z ~ N(0, I_2)`` and applies ``dW = sqrt(|int_dt|) * z``
+    internally. The optional ``ctrl`` argument is present when ``controls`` is
+    provided — the solver slices it at each step; the term owns its interpretation.
 
     The solver runs on a fine integration grid of ``n_fine = n_save * n_substeps``
     steps (where ``n_substeps = round(save_dt / int_dt)``), then slices every
     ``n_substeps`` steps to produce the ``n_save + 1`` saved states.
 
-    **Ensemble**: pass ``n_samples > 1`` in SDE mode to obtain an ensemble of
-    independent realisations; the key is split internally and trajectories are
-    produced via ``jax.vmap``.
-
-    **Perturbed ODE**: treat as ODE+controls and use
+    **Ensemble**: pass ``n_samples > 1`` in SDE mode; the key is split internally.
+    **Perturbed ODE**: use ODE+controls and
     ``jax.vmap(lambda c: solve(..., controls=c))(controls_batch)``.
 
     Args:
-        term: Dynamics callable. ODE: ``f(t, y, args)`` or ``f(t, y, args, ctrl)``.
-            SDE: ``f(t, y, args)`` returning ``(drift, g)``.
+        term: Dynamics callable ``f(t, y, args[, ctrl])``. ODE: returns velocity.
+            SDE: returns ``(drift, g)`` where ``g`` is the diffusion coefficient,
+            shape ``(2,)`` diagonal or ``(2, 2)`` full matrix.
         args: Arbitrary JAX pytree passed through to term (e.g. a Dataset).
         y0: Initial state [lat, lon] in degrees, shape (2,).
         t0: Start time in seconds. JAX scalar — can change between calls without

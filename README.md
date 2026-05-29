@@ -41,96 +41,66 @@ Installing a JAX **GPU version** should be done prior to installing `pastax`, fo
 
 ## Quick Start
 
-### ODE simulation (deterministic)
+### ODE and SDE simulation
 
-A term returns a single velocity array — `solve()` runs in ODE mode by default.
-
-```python
-import jax.numpy as jnp
-from pastax import solve, Heun, meters_to_degrees
-
-def my_term(t, y, args):
-    dataset = args
-    lat, lon = y[0], y[1]
-    u = dataset["u"].interp(t, lat, lon)   # eastward velocity, m/s
-    v = dataset["v"].interp(t, lat, lon)   # northward velocity, m/s
-    return meters_to_degrees(jnp.array([v, u]), lat)  # → deg/s
-
-y0  = jnp.array([48.0, -4.0])   # [lat, lon] in degrees
-t0  = jnp.array(0.0)            # start time, seconds (traced — no recompile on change)
-# 5 days at 1-hour steps:
-trajectory = solve(my_term, dataset, y0, t0, n_save=120, int_dt=3600., save_dt=3600., solver=Heun())
-# trajectory: shape (121, 2)
-```
+The term signature is `term(t, y, args[, ctrl])`. Without `key` it is ODE mode
+and the term returns a velocity; with `key` it is SDE mode and the term returns
+`(drift, g)`. The optional `ctrl` argument is present when `controls` is passed
+to `solve()` — the solver slices `controls[i]` at each step and forwards it; the
+term owns all interpretation.
 
 `t0` is a traced JAX scalar — changing it never triggers recompilation. `n_save`,
 `int_dt`, and `save_dt` are static Python scalars; the end time is implicit as
-`t0 + n_save * save_dt`. Sub-stepping (finer integration than output frequency)
-is expressed by setting `int_dt < save_dt` with `save_dt / int_dt` an integer.
-
-### ODE simulation with per-step controls
-
-For terms that need time-varying external inputs at each integration step (e.g. a
-pre-sampled noise trajectory for a perturbed ODE), pass a `controls` pytree whose
-leading axis has length `n_fine = n_save * round(save_dt / int_dt)`. The solver
-slices it at each step and passes the slice as a 4th argument to the term.
+`t0 + n_save * save_dt`. Sub-stepping is expressed by setting `int_dt < save_dt`
+with `save_dt / int_dt` an integer.
 
 ```python
+import jax.numpy as jnp
+import jax.random as jr
+from pastax import solve, Heun, EulerHeun, meters_to_degrees
+
+# --- ODE term (no key) ---
+def my_ode_term(t, y, args):
+    dataset = args
+    u = dataset["u"].interp(t, y[0], y[1])
+    v = dataset["v"].interp(t, y[0], y[1])
+    return meters_to_degrees(jnp.array([v, u]), y[0])   # deg/s
+
+y0 = jnp.array([48.0, -4.0])   # [lat, lon]
+t0 = jnp.array(0.0)            # start time, seconds
+traj = solve(my_ode_term, dataset, y0, t0, n_save=120, int_dt=3600., save_dt=3600.)
+# shape (121, 2)
+
+# --- ODE term with per-step controls ---
 def perturbed_term(t, y, args, ctrl):
     dataset = args
-    base_vel = ...                   # usual dynamics
-    residual = 1e-4 * jnp.tanh(ctrl)
-    return base_vel + residual
+    base_vel = ...
+    return base_vel + 1e-4 * jnp.tanh(ctrl)
 
-controls = jax.random.normal(key, shape=(n_fine, 2))  # pre-sampled
-traj = solve(perturbed_term, dataset, y0, t0, n_save, int_dt, save_dt, controls=controls)
+n_fine = 120  # = n_save * round(save_dt / int_dt)
+traj = solve(perturbed_term, dataset, y0, t0, n_save=120, int_dt=3600., save_dt=3600.,
+             controls=jax.random.normal(key, (n_fine, 2)))
 
-# Ensemble of perturbed trajectories via vmap:
-controls_batch = jax.random.normal(key, shape=(S, n_fine, 2))
-ensemble = jax.vmap(
-    lambda c: solve(perturbed_term, dataset, y0, t0, n_save, int_dt, save_dt, controls=c)
-)(controls_batch)
-# shape (S, n_save+1, 2)
-```
-
-The term owns all interpretation and scaling of the controls slice.
-
-### SDE simulation (stochastic)
-
-SDE mode is activated by passing `key` to `solve()`. The term signature is
-`term(t, y, args) -> (drift, g)`: `drift` is the deterministic velocity and
-`g` is the diffusion coefficient (diagonal shape `(2,)` or full matrix `(2, 2)`).
-The solver draws `z ~ N(0, I_2)` internally, builds the Wiener increment as
-`dW = sqrt(dt) * z`, and applies `dy = drift*dt + g*dW`. The term never sees `z`.
-
-```python
-import jax.random as jr
-from pastax import EulerHeun
-
-def my_term(t, y, args):
+# --- SDE term (pass key) ---
+def my_sde_term(t, y, args):
     dataset = args
-    lat, lon = y[0], y[1]
-    u = dataset["u"].interp(t, lat, lon)
-    v = dataset["v"].interp(t, lat, lon)
-    drift = meters_to_degrees(jnp.array([v, u]), lat)
+    u = dataset["u"].interp(t, y[0], y[1])
+    v = dataset["v"].interp(t, y[0], y[1])
+    drift = meters_to_degrees(jnp.array([v, u]), y[0])
     g     = jnp.full(2, 1e-5)   # diagonal diffusion, deg / sqrt(s)
-    return drift, g
+    return drift, g              # z ~ N(0, I_2) is drawn internally
 
-# Single stochastic trajectory
-traj = solve(my_term, dataset, y0, t0, n_save, int_dt, save_dt, EulerHeun(), key=jr.key(0))
-# shape (n_save+1, 2)
-
-# Ensemble of 100 independent realisations — key split internally
-ensemble = solve(my_term, dataset, y0, t0, n_save, int_dt, save_dt, EulerHeun(),
+traj     = solve(my_sde_term, dataset, y0, t0, 120, 3600., 3600., EulerHeun(), key=jr.key(0))
+ensemble = solve(my_sde_term, dataset, y0, t0, 120, 3600., 3600., EulerHeun(),
                  key=jr.key(0), n_samples=100)
-# shape (100, n_save+1, 2)
+# shapes: (121, 2) and (100, 121, 2)
 ```
 
-The `Euler`, `Heun`, and `RK4` solvers also accept SDE mode (Euler-Maruyama,
-Stratonovich Heun, Stratonovich RK4). For diagonal noise specifically, the
-`ItoMilstein` and `StratonovichMilstein` solvers give strong order 1.0 by
-adding the Milstein cross-term computed via `jax.jacfwd` over the term's
-`g`. They raise `NotImplementedError` if `g` is matrix-valued.
+In SDE mode the solver draws `z ~ N(0, I_2)` and applies `dW = sqrt(dt) * z`
+internally; the term never sees `z`. `g` can be shape `(2,)` (diagonal) or
+`(2, 2)` (full matrix). The `Euler`, `Heun`, and `RK4` solvers accept both ODE
+and SDE mode; `ItoMilstein` / `StratonovichMilstein` give strong order 1.0 for
+diagonal `g` via `jax.jacfwd`.
 
 ### Loading forcing fields from xarray
 
