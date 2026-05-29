@@ -578,15 +578,27 @@ def _run_ode(
     y0: Float[Array, "2"],
     ts: Float[Array, " time"],
     solver: AbstractSolver,
+    controls: PyTree | None = None,
 ) -> Float[Array, "time 2"]:
     dt = ts[1] - ts[0]
 
-    @jax.checkpoint
-    def body(y: Float[Array, "2"], t: Float[Array, ""]) -> tuple:
-        y_new = solver.ode_step(term, t, y, dt, args)
-        return y_new, y_new
+    if controls is None:
+        @jax.checkpoint
+        def body(y: Float[Array, "2"], t: Float[Array, ""]) -> tuple:
+            y_new = solver.ode_step(term, t, y, dt, args)
+            return y_new, y_new
 
-    _, ys = jax.lax.scan(body, y0, ts[:-1])
+        _, ys = jax.lax.scan(body, y0, ts[:-1])
+    else:
+        @jax.checkpoint
+        def body(y: Float[Array, "2"], inputs: tuple) -> tuple:
+            t, ctrl = inputs
+            bound = lambda t_, y_, a_: term(t_, y_, a_, ctrl)
+            y_new = solver.ode_step(bound, t, y, dt, args)
+            return y_new, y_new
+
+        _, ys = jax.lax.scan(body, y0, (ts[:-1], controls))
+
     return jnp.concatenate([y0[None], ys], axis=0)
 
 
@@ -596,22 +608,18 @@ def _run_sde(
     y0: Float[Array, "2"],
     ts: Float[Array, " time"],
     solver: AbstractSolver,
-    noise: Float[Array, "samples steps n_noise"],
-) -> Float[Array, "samples time 2"]:
-    """Integrate an SDE ensemble. noise must be pre-sampled: shape (S, n_steps, n_noise)."""
+    controls: Float[Array, "steps n_noise"],
+) -> Float[Array, "time 2"]:
     dt = ts[1] - ts[0]
 
-    def solve_one(noise_i: Float[Array, "steps n_noise"]) -> Float[Array, "time 2"]:
-        @jax.checkpoint
-        def body(y: Float[Array, "2"], inputs: tuple) -> tuple:
-            t, z = inputs
-            y_new = solver.sde_step(term, t, y, dt, args, z)
-            return y_new, y_new
+    @jax.checkpoint
+    def body(y: Float[Array, "2"], inputs: tuple) -> tuple:
+        t, z = inputs
+        y_new = solver.sde_step(term, t, y, dt, args, z)
+        return y_new, y_new
 
-        _, ys = jax.lax.scan(body, y0, (ts[:-1], noise_i))
-        return jnp.concatenate([y0[None], ys], axis=0)
-
-    return jax.vmap(solve_one)(noise)
+    _, ys = jax.lax.scan(body, y0, (ts[:-1], controls))
+    return jnp.concatenate([y0[None], ys], axis=0)
 
 
 def solve(
@@ -624,46 +632,39 @@ def solve(
     save_dt: float,
     solver: AbstractSolver | None = None,
     *,
+    controls: PyTree | None = None,
     key: Key[Array, ""] | None = None,
-    n_samples: int | None = None,
     n_noise: int | None = None,
-    noise: Float[Array, "..."] | None = None,
     adjoint: Literal["recursive_checkpoint", "forward"] = "recursive_checkpoint",
-) -> Float[Array, "time 2"] | Float[Array, "samples time 2"]:
+) -> Float[Array, "time 2"]:
     """Integrate a trajectory for ``n_save`` output intervals starting at ``t0``.
 
     Mode is selected by the caller:
 
-    - **ODE** (default): none of ``key``, ``noise``, or ``n_noise`` are passed.
-      ``term(t, y, args) -> Float[Array, "2"]`` returns velocity.
+    - **ODE** (default): ``term(t, y, args) -> Float[Array, "2"]`` returns velocity.
 
-    - **SDE**: at least one of ``key``, ``noise``, or ``n_noise`` is passed.
-      ``term(t, y, args, z) -> (drift, g)`` where ``drift`` is the
-      deterministic velocity and ``g`` is the diffusion coefficient.
-      ``g`` may be diagonal (shape ``(2,)``) or a full matrix (shape
-      ``(2, 2)``). The solver applies ``dW = sqrt(|dt|) * z`` internally.
-      Nonlinear noise models (e.g. an MDN-style residual) can be expressed by
-      using ``z`` inside ``drift`` and returning ``g = jnp.zeros(2)``; the
-      solver then evolves ``dy = drift*dt`` — a random-ODE step.
+    - **ODE with controls**: ``term(t, y, args, ctrl) -> Float[Array, "2"]``. Pass
+      ``controls`` as a pytree whose leading axis has length ``n_fine``; the solver
+      slices ``controls[i]`` at each step and passes it as the 4th argument to the
+      term. The term owns all interpretation and scaling of the controls.
+
+    - **SDE**: pass ``key`` and ``n_noise``. ``term(t, y, args, z) -> (drift, g)``
+      where ``drift`` is the deterministic velocity and ``g`` is the diffusion
+      coefficient (diagonal shape ``(2,)`` or full matrix ``(2, 2)``). The solver
+      draws ``z ~ N(0, I)`` and applies ``dW = sqrt(|int_dt|) * z`` internally.
 
     The solver runs on a fine integration grid of ``n_fine = n_save * n_substeps``
     steps (where ``n_substeps = round(save_dt / int_dt)``), then slices every
     ``n_substeps`` steps to produce the ``n_save + 1`` saved states.
 
-    Noise for SDE mode can be supplied in two ways:
-
-    1. **Pre-sampled** (recommended): pass ``noise`` directly.
-       - Shape ``(n_fine, n_noise)`` → single realisation, returns ``(n_save+1, 2)``.
-       - Shape ``(S, n_fine, n_noise)`` → ensemble, returns ``(S, n_save+1, 2)``.
-       ``key`` and ``n_noise`` are not needed when ``noise`` is provided.
-
-    2. **Auto-sampled**: pass ``key`` and ``n_noise`` (and optionally
-       ``n_samples``). A single ``jax.random.normal`` call draws the full
-       ``(n_samples, n_fine, n_noise)`` array before vmap and scan.
+    **Ensembles and pre-sampled noise**: use ``jax.vmap`` over ``solve``. For SDE
+    ensembles: ``vmap(lambda k: solve(..., key=k, n_noise=n))(keys)``. For a
+    perturbed ODE with different noise per trajectory: treat it as ODE+controls
+    and ``vmap(lambda c: solve(..., controls=c))(controls_batch)``.
 
     Args:
-        term: Dynamics callable. ODE: ``f(t, y, args)``. SDE:
-            ``f(t, y, args, z)`` returning ``(drift, g)``.
+        term: Dynamics callable. ODE: ``f(t, y, args)`` or ``f(t, y, args, ctrl)``.
+            SDE: ``f(t, y, args, z)`` returning ``(drift, g)``.
         args: Arbitrary JAX pytree passed through to term (e.g. a Dataset).
         y0: Initial state [lat, lon] in degrees, shape (2,).
         t0: Start time in seconds. JAX scalar — can change between calls without
@@ -675,24 +676,17 @@ def solve(
         save_dt: Output interval in seconds (static). Must be an integer multiple
             of ``int_dt`` (same sign). ``n_substeps = round(save_dt / int_dt) >= 1``.
         solver: Solver instance. Defaults to Heun().
-        key: PRNG key for auto-sampling noise (SDE only). Required when ``noise``
-            is None and ``n_noise`` is provided.
-        n_samples: Number of realisations for auto-sampled SDE. Defaults to 1 when
-            ``n_noise`` is provided.
-        n_noise: Dimension of the noise vector ``z``. Required for auto-sampling;
-            inferred from ``noise.shape[-1]`` when pre-sampled noise is provided.
-            For the current solver lineup this is always 2.
-        noise: Pre-sampled noise array of shape ``(n_fine, n_noise)`` (single) or
-            ``(S, n_fine, n_noise)`` (ensemble). When provided, ``key`` and
-            ``n_noise`` are not used.
+        controls: Per-step pytree with leading axis ``n_fine``. For ODE+controls,
+            passed as-is to the term. Cannot be combined with ``key``/``n_noise``.
+        key: PRNG key for SDE mode. Required together with ``n_noise``.
+        n_noise: Dimension of the noise vector ``z`` (SDE only). Required together
+            with ``key``.
         adjoint: AD strategy for ODE mode only. "recursive_checkpoint" uses
             lax.scan (discretise-then-optimise). "forward" is compatible with
             jax.jvp.
 
     Returns:
-        - ODE: shape ``(n_save + 1, 2)``.
-        - SDE, single realisation: shape ``(n_save + 1, 2)``.
-        - SDE, ensemble: shape ``(S, n_save + 1, 2)``.
+        Shape ``(n_save + 1, 2)``.
     """
     if solver is None:
         solver = Heun()
@@ -710,30 +704,14 @@ def solve(
     n_fine = n_save * n_substeps
     ts_fine = t0 + jnp.arange(n_fine + 1) * int_dt
 
-    # ODE mode: none of the SDE-specific arguments are provided.
-    if key is None and noise is None and n_noise is None:
-        fine_result = _run_ode(term, args, y0, ts_fine, solver)
-        return fine_result[::n_substeps]
-
-    # SDE path — normalise noise to (S, n_fine, n_noise) then run once.
-    if noise is not None:
-        squeeze = noise.ndim == 2          # single realisation → remove S axis on output
-        noise_3d = noise[None] if squeeze else noise
-    elif key is not None:
-        if n_noise is None:
-            raise ValueError(
-                "SDE mode: 'n_noise' is required when auto-sampling noise via 'key'. "
-                "Pass n_noise=<latent dimension> or provide pre-sampled 'noise' instead."
-            )
-        squeeze = n_samples is None
-        n = 1 if squeeze else n_samples
-        noise_3d = jr.normal(key, shape=(n, n_fine, n_noise), dtype=y0.dtype)
+    if key is not None or n_noise is not None:
+        if controls is not None:
+            raise ValueError("Cannot combine 'controls' with 'key'/'n_noise' (SDE mode).")
+        if key is None or n_noise is None:
+            raise ValueError("SDE mode requires both 'key' and 'n_noise'.")
+        controls = jr.normal(key, shape=(n_fine, n_noise), dtype=y0.dtype)
+        result = _run_sde(term, args, y0, ts_fine, solver, controls)
     else:
-        raise ValueError(
-            "SDE mode (n_noise was provided) but neither 'key' nor 'noise' was given. "
-            "Pass key=jax.random.key(seed) or noise=jnp.array(...)."
-        )
+        result = _run_ode(term, args, y0, ts_fine, solver, controls)
 
-    ensemble = _run_sde(term, args, y0, ts_fine, solver, noise_3d)
-    sliced = ensemble[:, ::n_substeps, :]
-    return sliced[0] if squeeze else sliced
+    return result[::n_substeps]
