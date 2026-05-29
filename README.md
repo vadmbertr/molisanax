@@ -98,35 +98,31 @@ The term owns all interpretation and scaling of the controls slice.
 ### SDE simulation (stochastic)
 
 SDE mode is activated by passing `key` to `solve()`. The term signature is
-`term(t, y, args, z) -> (drift, g)`: `drift` is the deterministic velocity,
-`g` is the diffusion coefficient (diagonal shape `(2,)` or full matrix `(2, 2)`),
-and `z ~ N(0, I_2)` is the per-step standard-normal noise sample drawn internally.
-The solver builds the Wiener increment as `dW = sqrt(dt) * z` and applies
-`dy = drift*dt + g*dW`.
+`term(t, y, args) -> (drift, g)`: `drift` is the deterministic velocity and
+`g` is the diffusion coefficient (diagonal shape `(2,)` or full matrix `(2, 2)`).
+The solver draws `z ~ N(0, I_2)` internally, builds the Wiener increment as
+`dW = sqrt(dt) * z`, and applies `dy = drift*dt + g*dW`. The term never sees `z`.
 
 ```python
-import jax
 import jax.random as jr
 from pastax import EulerHeun
 
-def my_term(t, y, args, z):
+def my_term(t, y, args):
     dataset = args
     lat, lon = y[0], y[1]
     u = dataset["u"].interp(t, lat, lon)
     v = dataset["v"].interp(t, lat, lon)
     drift = meters_to_degrees(jnp.array([v, u]), lat)
     g     = jnp.full(2, 1e-5)   # diagonal diffusion, deg / sqrt(s)
-    return drift, g              # z ~ N(0, I_2) is handled by the solver
+    return drift, g
 
 # Single stochastic trajectory
 traj = solve(my_term, dataset, y0, t0, n_save, int_dt, save_dt, EulerHeun(), key=jr.key(0))
 # shape (n_save+1, 2)
 
-# Ensemble of 100 independent realisations via vmap over keys
-keys = jr.split(jr.key(0), 100)
-ensemble = jax.vmap(
-    lambda k: solve(my_term, dataset, y0, t0, n_save, int_dt, save_dt, EulerHeun(), key=k)
-)(keys)
+# Ensemble of 100 independent realisations — key split internally
+ensemble = solve(my_term, dataset, y0, t0, n_save, int_dt, save_dt, EulerHeun(),
+                 key=jr.key(0), n_samples=100)
 # shape (100, n_save+1, 2)
 ```
 

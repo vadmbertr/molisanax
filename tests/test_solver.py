@@ -26,7 +26,7 @@ def uniform_ode_term(dlat, dlon):
 
 # SDE term: constant drift + constant diagonal diffusion coefficient.
 def uniform_sde_term(dlat, dlon, noise_scale=1e-6):
-    def term(t, y, args, z):
+    def term(t, y, args):
         f = jnp.array([dlat, dlon])
         g = jnp.full(2, noise_scale)
         return f, g
@@ -311,12 +311,21 @@ class TestSolveODE:
         ensemble = fn(controls_batch)
         assert ensemble.shape == (S, n_save + 1, 2)
 
-    def test_controls_and_key_raises(self):
+    def test_sde_with_controls_shape(self):
+        # SDE+controls: both key and controls can be combined.
         y0 = jnp.zeros(2)
-        controls = jnp.zeros((5, 2))
-        with pytest.raises(ValueError, match="controls"):
-            solve(uniform_sde_term(0.0, 0.0), None, y0, jnp.array(0.0), 5, 1.0, 1.0,
-                  controls=controls, key=jax.random.key(0))
+        n_save, int_dt = 5, 1.0
+
+        def term(t, y, args, ctrl):
+            drift = jnp.array([1e-4, 2e-4]) + 1e-5 * ctrl
+            g = jnp.full(2, 1e-6)
+            return drift, g
+
+        controls = jnp.zeros((n_save, 2))
+        traj = solve(term, None, y0, jnp.array(0.0), n_save, int_dt, int_dt,
+                     controls=controls, key=jax.random.key(0))
+        assert traj.shape == (n_save + 1, 2)
+        assert jnp.all(jnp.isfinite(traj))
 
     def test_controls_substep(self):
         # Controls on fine grid; output sliced to n_save+1 points.
@@ -349,22 +358,17 @@ class TestSolveSDE:
                          jnp.array(0.0), 50, 10.0, 10.0)
         assert jnp.allclose(sde_traj, ode_traj, atol=1e-5)
 
-    def test_ensemble_via_vmap(self):
-        # Ensembles are the user's responsibility via vmap over keys.
+    def test_n_samples_shape(self):
         y0 = jnp.zeros(2)
-        keys = jax.random.split(jax.random.key(0), 7)
-        fn = jax.vmap(lambda k: solve(uniform_sde_term(1e-4, 2e-4), None, y0,
-                                      jnp.array(0.0), 10, 10.0, 10.0, key=k))
-        ensemble = fn(keys)
+        ensemble = solve(uniform_sde_term(1e-4, 2e-4), None, y0,
+                         jnp.array(0.0), 10, 10.0, 10.0, n_samples=7, key=jax.random.key(0))
         assert ensemble.shape == (7, 11, 2)
         assert jnp.all(jnp.isfinite(ensemble))
 
     def test_ensemble_mean_close_to_ode_with_small_noise(self):
         y0 = jnp.zeros(2)
-        keys = jax.random.split(jax.random.key(0), 200)
-        fn = jax.vmap(lambda k: solve(uniform_sde_term(1e-4, 2e-4, noise_scale=1e-8), None, y0,
-                                      jnp.array(0.0), 10, 10.0, 10.0, key=k))
-        ensemble = fn(keys)
+        ensemble = solve(uniform_sde_term(1e-4, 2e-4, noise_scale=1e-8), None, y0,
+                         jnp.array(0.0), 10, 10.0, 10.0, n_samples=200, key=jax.random.key(0))
         ode_traj = solve(uniform_ode_term(1e-4, 2e-4), None, y0, jnp.array(0.0), 10, 10.0, 10.0)
         assert jnp.allclose(ensemble.mean(axis=0), ode_traj, atol=1e-4)
 
@@ -377,7 +381,7 @@ class TestSolveSDE:
 
     def test_matrix_diffusion(self):
         # g.shape == (2, 2): full matrix diffusion; z is always (2,).
-        def term_mat(t, y, args, z):
+        def term_mat(t, y, args):
             drift = jnp.zeros(2)
             g = 1e-6 * jnp.array([[1.0, 0.5], [0.5, 1.0]])
             return drift, g
@@ -518,7 +522,7 @@ class TestEulerHeun:
         assert jnp.allclose(y_eh, y_em)
 
     def test_matrix_diffusion(self):
-        def term_mat(t, y, args, z):
+        def term_mat(t, y, args):
             drift = jnp.array([0.1, 0.2])
             g = jnp.array([[0.5, 0.1], [0.1, 0.5]])
             return drift, g
@@ -540,7 +544,7 @@ class TestEulerHeun:
 # ---------------------------------------------------------------------------
 
 def _linear_diffusion_term(sigma, drift=(0.0, 0.0)):
-    def term(t, y, args, z):
+    def term(t, y, args):
         f = jnp.array(drift)
         g = sigma * y
         return f, g
@@ -576,7 +580,7 @@ class TestItoMilstein:
         assert jnp.allclose(y_ito - y_str, expected_diff)
 
     def test_matrix_g_raises(self):
-        def term_mat(t, y, args, z):
+        def term_mat(t, y, args):
             return jnp.zeros(2), jnp.eye(2)
         with pytest.raises(NotImplementedError, match="diagonal"):
             ItoMilstein().sde_step(
@@ -610,7 +614,7 @@ class TestStratonovichMilstein:
         assert jnp.allclose(y_sm, y_em)
 
     def test_matrix_g_raises(self):
-        def term_mat(t, y, args, z):
+        def term_mat(t, y, args):
             return jnp.zeros(2), jnp.eye(2)
         with pytest.raises(NotImplementedError, match="diagonal"):
             StratonovichMilstein().sde_step(
