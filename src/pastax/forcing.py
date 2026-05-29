@@ -28,7 +28,19 @@ def _coerce_time_to_seconds(t: Array) -> Array:
     they are reinterpreted as seconds since the Unix epoch. Plain numeric arrays
     are returned unchanged and are treated as "seconds since some reference"
     (only differences matter to the solver).
+
+    JAX arrays (concrete or traced) are passed straight through: JAX has no
+    ``datetime64`` dtype, so there is nothing to coerce, and this keeps the
+    helper safe to call under ``jax.vmap`` / ``jax.jit`` when ``t`` is a tracer
+    (``np.asarray`` on a tracer would raise).
     """
+    if isinstance(t, jax.Array):
+        return t
+
+    # The ``Array`` annotation aliases ``jax.Array``, so type checkers flag the
+    # lines below as unreachable. They are not: at runtime ``t`` is often a
+    # NumPy ``datetime64`` / numeric array (e.g. from ``from_xarray``), which is
+    # exactly what this NumPy path handles.
     import numpy as np
 
     t_arr = np.asarray(t)

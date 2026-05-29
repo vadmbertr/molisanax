@@ -2,7 +2,7 @@
 
 **P**arameterizable **A**uto-differentiable **S**imulators for ocean surface **T**rajectories in j**AX**.
 
-`pastax` integrates particle trajectories on the ocean surface by solving ODEs and SDEs over user-supplied forcing fields (e.g. surface currents). Every computation is fully differentiable via JAX automatic differentiation — both forward-mode (`jax.jvp`) and reverse-mode (`jax.grad`) are supported.
+`pastax` integrates particle trajectories on the ocean surface by solving ODEs and SDEs over user-supplied forcing fields (e.g. surface currents). Every computation is fully differentiable via JAX automatic differentiation — both forward-mode (`jax.jvp`) and reverse-mode (`jax.grad`) are supported (forward-mode requires `solve(..., adjoint="direct")`; the default checkpointed adjoint is reverse-mode only).
 
 📖 **Documentation:** <https://vadmbertr.github.io/pastax/> — full API reference and a runnable [tutorial notebook](docs/tutorial.ipynb).
 
@@ -271,15 +271,23 @@ backtrack = solve(my_term, y0_end,
 ```python
 import jax
 
-# Reverse-mode gradient through the ODE solver
+# Reverse-mode gradient through the ODE solver (default adjoint="checkpointed":
+# low-memory binomial checkpointing, O(log n) memory by default)
 grad = jax.grad(lambda y0: solve(ode_term, y0, t0, n_save, int_dt, save_dt, args=dataset).sum())(y0)
 
-# Forward-mode JVP
+# Forward-mode JVP requires adjoint="direct" (the checkpointed adjoint is reverse-mode only)
 traj, tangent = jax.jvp(
-    lambda y0: solve(ode_term, y0, t0, n_save, int_dt, save_dt, args=dataset),
+    lambda y0: solve(ode_term, y0, t0, n_save, int_dt, save_dt, args=dataset, adjoint="direct"),
     (y0,), (jnp.ones(2),),
 )
 ```
+
+The `solve` `adjoint` argument selects the differentiation strategy: `"checkpointed"`
+(default) uses binomial checkpointing for low reverse-mode memory but does not support
+`jax.jvp`; `"direct"` supports both `jax.grad` and `jax.jvp` at O(n) memory. The
+`checkpoints` argument tunes the memory/recompute tradeoff of the checkpointed adjoint
+(default `None` → O(log n) memory; larger → more memory, less recompute; `"all"` →
+checkpoint every step).
 
 ### Trajectory metrics
 

@@ -59,9 +59,11 @@ solver sign-abs-normalises the ``sqrt(dt)`` factor.
 from __future__ import annotations
 
 import abc
+import math
 from typing import Callable
 
 import equinox as eqx
+import equinox.internal as eqxi  # pyright: ignore[reportMissingImports]  # checkpointed scan (treeverse) — same private API Diffrax uses
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -583,6 +585,21 @@ class StratonovichMilstein(AbstractSolver):
         return y + f * dt + g * dW + cross
 
 
+def _scan(body, init, xs, adjoint, checkpoints):
+    """Run the integration loop with the chosen differentiation strategy.
+
+    ``"checkpointed"`` uses Equinox's binomial-checkpointing scan (treeverse): low
+    reverse-mode memory but not forward-mode autodifferentiable. ``"direct"`` uses a
+    plain ``lax.scan`` (with per-step ``jax.checkpoint``, transparent to ``jvp``) and
+    supports both forward and reverse mode.
+    """
+    if adjoint == "checkpointed":
+        return eqxi.scan(body, init, xs, kind="checkpointed", checkpoints=checkpoints)
+    if adjoint == "direct":
+        return jax.lax.scan(jax.checkpoint(body), init, xs)
+    raise ValueError(f'adjoint must be "checkpointed" or "direct", got {adjoint!r}.')
+
+
 def _run_ode(
     term: Callable,
     y0: Float[Array, "2"],
@@ -590,6 +607,8 @@ def _run_ode(
     solver: AbstractSolver,
     args: PyTree | None = None,
     controls: PyTree | None = None,
+    adjoint: str = "checkpointed",
+    checkpoints: int | str | None = None,
 ) -> Float[Array, "time 2"]:
     dt = ts[1] - ts[0]
 
@@ -620,8 +639,8 @@ def _run_ode(
         xs = ts[:-1]
     else:
         xs = (ts[:-1], controls)
-    
-    _, ys = jax.lax.scan(jax.checkpoint(body), y0, xs)
+
+    _, ys = _scan(body, y0, xs, adjoint, checkpoints)
 
     return jnp.concatenate([y0[None], ys], axis=0)
 
@@ -634,6 +653,8 @@ def _run_sde(
     z_seq: Float[Array, "steps 2"],
     args: PyTree | None = None,
     controls: PyTree | None = None,
+    adjoint: str = "checkpointed",
+    checkpoints: int | str | None = None,
 ) -> Float[Array, "time 2"]:
     dt = ts[1] - ts[0]
 
@@ -666,8 +687,8 @@ def _run_sde(
         xs = (ts[:-1], z_seq)
     else:
         xs = (ts[:-1], z_seq, controls)
-    
-    _, ys = jax.lax.scan(jax.checkpoint(body), y0, xs)
+
+    _, ys = _scan(body, y0, xs, adjoint, checkpoints)
 
     return jnp.concatenate([y0[None], ys], axis=0)
 
@@ -684,6 +705,8 @@ def solve(
     controls: PyTree | None = None,
     key: Key[Array, ""] | None = None,
     n_samples: int = 1,
+    adjoint: str = "checkpointed",
+    checkpoints: int | str | None = None,
 ) -> Array:
     """Integrate a trajectory for ``n_save`` output intervals starting at ``t0``.
 
@@ -723,6 +746,16 @@ def solve(
         n_samples: Number of independent SDE realisations (default 1). Ignored in
             ODE mode. When > 1, the key is split and trajectories are vmapped;
             output shape is ``(n_samples, n_save + 1, 2)``.
+        adjoint: Differentiation strategy for the integration loop.
+            ``"checkpointed"`` (default) uses binomial checkpointing (treeverse) for
+            low reverse-mode memory, but is **reverse-mode only** — ``jax.jvp`` is not
+            supported. ``"direct"`` uses a plain scan that supports **both** ``jax.grad``
+            and ``jax.jvp`` at O(n_fine) memory.
+        checkpoints: Memory knob for ``adjoint="checkpointed"`` (ignored otherwise).
+            ``None`` (default) uses ``ceil(log2(n_fine))`` checkpoints → O(log n_fine)
+            memory and O(n_fine·log n_fine) recompute. A larger int trades memory for less
+            recompute (e.g. ``~sqrt(n_fine)`` → O(sqrt n_fine) memory, O(n_fine) time);
+            ``"all"`` checkpoints every step (O(n_fine) memory, no recompute).
 
     Returns:
         Shape ``(n_save + 1, 2)`` in ODE mode or SDE with ``n_samples == 1``.
@@ -730,6 +763,9 @@ def solve(
     """
     if solver is None:
         solver = Heun()
+
+    if adjoint not in ("checkpointed", "direct"):
+        raise ValueError(f'adjoint must be "checkpointed" or "direct", got {adjoint!r}.')
 
     n_substeps = round(save_dt / int_dt)
     if n_substeps < 1:
@@ -744,15 +780,20 @@ def solve(
     n_fine = n_save * n_substeps
     ts_fine = t0 + jnp.arange(n_fine + 1) * int_dt
 
+    if adjoint == "checkpointed" and checkpoints is None:
+        checkpoints = max(1, math.ceil(math.log2(max(n_fine, 2))))
+
     if key is not None:
         if n_samples == 1:
             z = jr.normal(key, shape=(n_fine, 2), dtype=y0.dtype)
-            result = _run_sde(term, y0, ts_fine, solver, z, args, controls)
+            result = _run_sde(term, y0, ts_fine, solver, z, args, controls, adjoint, checkpoints)
             return result[::n_substeps]
         else:
             z = jr.normal(key, shape=(n_samples, n_fine, 2), dtype=y0.dtype)
-            result = jax.vmap(lambda z_: _run_sde(term, y0, ts_fine, solver, z_, args, controls))(z)
+            result = jax.vmap(
+                lambda z_: _run_sde(term, y0, ts_fine, solver, z_, args, controls, adjoint, checkpoints)
+            )(z)
             return result[:, ::n_substeps]
     else:
-        result = _run_ode(term, y0, ts_fine, solver, args, controls)
+        result = _run_ode(term, y0, ts_fine, solver, args, controls, adjoint, checkpoints)
         return result[::n_substeps]
