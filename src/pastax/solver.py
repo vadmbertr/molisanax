@@ -27,36 +27,33 @@ Term API
 ODE term: ``f(t, y, args) -> Float[Array, "2"]`` returns velocity
 [dlat/dt, dlon/dt] in degrees/second.
 
+ODE term with controls: ``f(t, y, args, ctrl) -> Float[Array, "2"]``. Per-step
+controls are passed via the ``controls`` argument of :func:`solve`; the solver
+slices them at each integration step and forwards the slice to the term. The
+term owns all interpretation and scaling of the controls slice.
+
 SDE term: ``f(t, y, args, z) -> tuple[Float[Array, "2"], Float[Array, "..."]]``
 returns ``(drift, g)``. ``drift`` is the deterministic velocity and ``g`` is
 the diffusion coefficient — the solver applies it as ``dy = drift*dt + g*dW``
-with ``dW = sqrt(|dt|) * z`` internally. Two ``g`` shapes are accepted:
+with ``dW = sqrt(|dt|) * z`` and ``z ~ N(0, I_2)`` (always size 2). Two ``g``
+shapes are accepted:
 
 - ``g.shape == (2,)`` — diagonal noise, noise step is ``g * dW`` componentwise.
 - ``g.shape == (2, 2)`` — full 2×2 noise, noise step is ``g @ dW``.
 
-``n_noise`` is always 2 in either case. The Milstein solvers require the
-diagonal form.
-
-The term receives ``z`` so that nonlinear noise models (e.g. Mixture Density Networks, Flow-based Neural Networks)
-can be expressed: set ``g = jnp.zeros(2)`` and fold the noise contribution into
-``drift`` using ``z`` directly. The solver then evolves ``dy = drift*dt`` — a
-random-ODE step rather than a textbook SDE step. Textbook-SDE terms simply
-ignore ``z`` and return state-only ``(drift, g)``. ``ItoMilstein`` and
-``StratonovichMilstein`` assume ``g`` is the true state-only diffusion
-coefficient (their correction is computed from ``∂g/∂y``); they reduce to
-plain Euler-Maruyama when ``g == 0``.
+The Milstein solvers require the diagonal form.
 
 Noise convention
 ----------------
-Per-step Wiener increment is ``dW = sqrt(|dt|) * z`` with ``z ~ N(0, 1)``
-pre-sampled before integration begins. Mode selection: passing any of ``key``,
-``noise``, or ``n_noise`` to :func:`solve` activates SDE mode.
+Per-step Wiener increment is ``dW = sqrt(|dt|) * z`` with ``z ~ N(0, I_2)``
+drawn once before integration begins via :func:`jax.random.normal`. Passing
+``key`` to :func:`solve` activates SDE mode; a single trajectory is produced.
+Ensembles are obtained by vmapping :func:`solve` over a batch of keys.
 
-Backwards-in-time integration is supported transparently for ODE solvers:
-pass a strictly decreasing ``ts`` and the solvers step backwards. SDE
-backwards integration is not a textbook construction, but the formula is
-finite because we sign-abs the ``sqrt(dt)`` factor.
+Backwards-in-time integration is supported for all solvers: pass a negative
+``int_dt`` (and matching negative ``save_dt``) to :func:`solve`. SDE backwards
+integration is not a textbook construction, but remains finite because the
+solver sign-abs-normalises the ``sqrt(dt)`` factor.
 """
 
 from __future__ import annotations

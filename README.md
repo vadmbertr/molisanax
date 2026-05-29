@@ -11,9 +11,10 @@
 - Bilinear interpolation of rectilinear forcing fields, with neighbourhood  cube extraction
 - A-grid and NEMO-convention Arakawa C-grid forcing layouts (`Dataset.from_arrays_cgrid` / `from_xarray_cgrid`)
 - Coastal robustness on A-grid: NaN-inferred land masks, inverse-distance partial-cell bilinear, and an opt-in partial-slip scheme via `Dataset.velocity_interp`
-- Unified `solve()` function — ODE/SDE mode selected by caller
-- ODE solvers: Euler, Heun, RK4, Tsit5, Dopri5. SDE solvers: Euler-Maruyama, Stratonovich Heun, Stratonovich RK4 via the ODE classes, plus dedicated EulerHeun, ItoMilstein, and StratonovichMilstein. SDE term has signature `term(t, y, args, z) -> (drift, g)`; the solver applies `dW = sqrt(dt) * z` internally, and nonlinear noise models can route `z` through `drift` directly
-- Forward or backwards-in-time integration (pass an increasing or decreasing `ts`)
+- Unified `solve()` function — ODE / ODE-with-controls / SDE mode selected by caller
+- ODE solvers: Euler, Heun, RK4, Tsit5, Dopri5. SDE solvers: Euler-Maruyama, Stratonovich Heun, Stratonovich RK4 via the ODE classes, plus dedicated EulerHeun, ItoMilstein, and StratonovichMilstein. SDE term has signature `term(t, y, args, z) -> (drift, g)`; the solver draws `z ~ N(0, I_2)` and applies `dW = sqrt(dt) * z` internally
+- Per-step `controls` pytree for ODE terms that need time-varying external inputs (perturbed ODEs, data-driven forcing, etc.)
+- Forward or backwards-in-time integration (pass negative `int_dt` / `save_dt`)
 - Geographic unit conversions (metres ↔ degrees)
 - Along-trajectory metrics with optional ensemble (vmap) mode
 - (Proper) Scoring rules to evaluate and train stochastic simulators
@@ -42,7 +43,7 @@ Installing a JAX **GPU version** should be done prior to installing `pastax`, fo
 
 ### ODE simulation (deterministic)
 
-A term returns a single velocity array — `solve()` detects ODE mode automatically.
+A term returns a single velocity array — `solve()` runs in ODE mode by default.
 
 ```python
 import jax.numpy as jnp
@@ -55,24 +56,56 @@ def my_term(t, y, args):
     v = dataset["v"].interp(t, lat, lon)   # northward velocity, m/s
     return meters_to_degrees(jnp.array([v, u]), lat)  # → deg/s
 
-ts = jnp.linspace(0.0, 86400.0 * 5, 121)  # 5 days, 1-hour steps
-y0 = jnp.array([48.0, -4.0])              # [lat, lon] in degrees
-
-trajectory = solve(my_term, dataset, y0, ts, Heun())
+y0  = jnp.array([48.0, -4.0])   # [lat, lon] in degrees
+t0  = jnp.array(0.0)            # start time, seconds (traced — no recompile on change)
+# 5 days at 1-hour steps:
+trajectory = solve(my_term, dataset, y0, t0, n_save=120, int_dt=3600., save_dt=3600., solver=Heun())
 # trajectory: shape (121, 2)
 ```
 
-### SDE simulation (stochastic ensemble)
+`t0` is a traced JAX scalar — changing it never triggers recompilation. `n_save`,
+`int_dt`, and `save_dt` are static Python scalars; the end time is implicit as
+`t0 + n_save * save_dt`. Sub-stepping (finer integration than output frequency)
+is expressed by setting `int_dt < save_dt` with `save_dt / int_dt` an integer.
 
-SDE mode is activated by passing `key`, `noise`, or `n_noise` to `solve()`.
-The term signature is `term(t, y, args, z) -> (drift, g)`: `drift` is the
-deterministic velocity, `g` is the diffusion coefficient, and `z` is the
-per-step standard-normal noise sample. The solver builds the Wiener
-increment as `dW = sqrt(dt) * z` and applies it internally as `dy = drift*dt + g*dW`.
-`g` may be either diagonal (shape `(2,)`, applied componentwise) or a full
-matrix (shape `(2, n_noise)`, applied as `g @ dW`).
+### ODE simulation with per-step controls
+
+For terms that need time-varying external inputs at each integration step (e.g. a
+pre-sampled noise trajectory for a perturbed ODE), pass a `controls` pytree whose
+leading axis has length `n_fine = n_save * round(save_dt / int_dt)`. The solver
+slices it at each step and passes the slice as a 4th argument to the term.
 
 ```python
+def perturbed_term(t, y, args, ctrl):
+    dataset = args
+    base_vel = ...                   # usual dynamics
+    residual = 1e-4 * jnp.tanh(ctrl)
+    return base_vel + residual
+
+controls = jax.random.normal(key, shape=(n_fine, 2))  # pre-sampled
+traj = solve(perturbed_term, dataset, y0, t0, n_save, int_dt, save_dt, controls=controls)
+
+# Ensemble of perturbed trajectories via vmap:
+controls_batch = jax.random.normal(key, shape=(S, n_fine, 2))
+ensemble = jax.vmap(
+    lambda c: solve(perturbed_term, dataset, y0, t0, n_save, int_dt, save_dt, controls=c)
+)(controls_batch)
+# shape (S, n_save+1, 2)
+```
+
+The term owns all interpretation and scaling of the controls slice.
+
+### SDE simulation (stochastic)
+
+SDE mode is activated by passing `key` to `solve()`. The term signature is
+`term(t, y, args, z) -> (drift, g)`: `drift` is the deterministic velocity,
+`g` is the diffusion coefficient (diagonal shape `(2,)` or full matrix `(2, 2)`),
+and `z ~ N(0, I_2)` is the per-step standard-normal noise sample drawn internally.
+The solver builds the Wiener increment as `dW = sqrt(dt) * z` and applies
+`dy = drift*dt + g*dW`.
+
+```python
+import jax
 import jax.random as jr
 from pastax import EulerHeun
 
@@ -82,25 +115,19 @@ def my_term(t, y, args, z):
     u = dataset["u"].interp(t, lat, lon)
     v = dataset["v"].interp(t, lat, lon)
     drift = meters_to_degrees(jnp.array([v, u]), lat)
-    g     = jnp.full(2, 1e-5)            # diagonal diffusion, deg / sqrt(s)
-    return drift, g                      # textbook SDE — z unused here
+    g     = jnp.full(2, 1e-5)   # diagonal diffusion, deg / sqrt(s)
+    return drift, g              # z ~ N(0, I_2) is handled by the solver
 
-key = jr.key(0)
+# Single stochastic trajectory
+traj = solve(my_term, dataset, y0, t0, n_save, int_dt, save_dt, EulerHeun(), key=jr.key(0))
+# shape (n_save+1, 2)
 
-# Single stochastic trajectory with the Stratonovich Euler-Heun solver
-traj = solve(my_term, dataset, y0, ts, EulerHeun(), key=key, n_noise=2)
-# shape (121, 2)
-
-# Ensemble of 100 independent realisations
-ensemble = solve(my_term, dataset, y0, ts, EulerHeun(),
-                 key=key, n_noise=2, n_samples=100)
-# shape (100, 121, 2)
-
-# Pre-sampled noise (reproducible; n_noise inferred from noise.shape[-1])
-n_steps = ts.shape[0] - 1
-noise = jr.normal(key, shape=(n_steps, 2))
-traj = solve(my_term, dataset, y0, ts, EulerHeun(), noise=noise)
-# shape (121, 2)
+# Ensemble of 100 independent realisations via vmap over keys
+keys = jr.split(jr.key(0), 100)
+ensemble = jax.vmap(
+    lambda k: solve(my_term, dataset, y0, t0, n_save, int_dt, save_dt, EulerHeun(), key=k)
+)(keys)
+# shape (100, n_save+1, 2)
 ```
 
 The `Euler`, `Heun`, and `RK4` solvers also accept SDE mode (Euler-Maruyama,
@@ -108,26 +135,6 @@ Stratonovich Heun, Stratonovich RK4). For diagonal noise specifically, the
 `ItoMilstein` and `StratonovichMilstein` solvers give strong order 1.0 by
 adding the Milstein cross-term computed via `jax.jacfwd` over the term's
 `g`. They raise `NotImplementedError` if `g` is matrix-valued.
-
-#### Nonlinear noise (random-ODE / MDN-style residuals)
-
-If the noise enters nonlinearly — e.g. a mixture density network mapping
-`(y, z) → residual_velocity` — express it inside `drift` (which has `z`
-available) and return a zero `g` of the right shape. The solver then evolves
-`dy = drift*dt` and the textbook `g*dW` path is bypassed.
-
-```python
-def mdn_term(t, y, args, z):                  # z has shape (n_noise,)
-    drift = base_velocity(t, y) + mdn(y, z)   # nonlinear in z
-    return drift, jnp.zeros((2, z.shape[0]))  # opt out of g*dW
-
-ensemble = solve(mdn_term, dataset, y0, ts, EulerHeun(),
-                 key=jr.key(0), n_noise=16, n_samples=64)
-```
-
-`ItoMilstein` and `StratonovichMilstein` assume `g` is the true state-only
-diffusion coefficient (their correction comes from `∂g/∂y`), so they reduce
-to plain Euler-Maruyama on the `drift` when `g == 0`.
 
 ### Loading forcing fields from xarray
 
@@ -276,12 +283,14 @@ disp_deg = meters_to_degrees(disp_m, lat_ref)   # [dlat, dlon] degrees
 
 ### Backwards-in-time integration
 
-Pass a strictly decreasing `ts` to integrate backwards. All ODE solvers (`Euler`, `Heun`, `RK4`, `Tsit5`, `Dopri5`) handle this transparently because `dt = ts[1] - ts[0]` becomes negative:
+Pass negative `int_dt` and `save_dt` to integrate backwards. All solvers handle
+this transparently:
 
 ```python
 y0_end = jnp.array([48.0, -4.0])
-ts_bwd = jnp.linspace(86400.0 * 5, 0.0, 121)   # 5 days, backwards
-backtrack = solve(my_term, dataset, y0_end, ts_bwd, RK4())
+backtrack = solve(my_term, dataset, y0_end,
+                  t0=jnp.array(86400.0 * 5), n_save=120, int_dt=-3600., save_dt=-3600.,
+                  solver=RK4())
 # backtrack[-1] is the source position 5 days earlier.
 ```
 
@@ -291,10 +300,13 @@ backtrack = solve(my_term, dataset, y0_end, ts_bwd, RK4())
 import jax
 
 # Reverse-mode gradient through the ODE solver
-grad = jax.grad(lambda y0: solve(my_ode_term, dataset, y0, ts).sum())(y0)
+grad = jax.grad(lambda y0: solve(my_ode_term, dataset, y0, t0, n_save, int_dt, save_dt).sum())(y0)
 
 # Forward-mode JVP
-traj, tangent = jax.jvp(lambda y0: solve(my_ode_term, dataset, y0, ts), (y0,), (jnp.ones(2),))
+traj, tangent = jax.jvp(
+    lambda y0: solve(my_ode_term, dataset, y0, t0, n_save, int_dt, save_dt),
+    (y0,), (jnp.ones(2),),
+)
 ```
 
 ### Trajectory metrics
