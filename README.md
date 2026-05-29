@@ -61,7 +61,7 @@ with `key` it is SDE mode and the term returns `(drift, g)`.
 ```python
 import jax.numpy as jnp
 import jax.random as jr
-from pastax import solve, Heun, EulerHeun, meters_to_degrees
+from pastax import solve, Heun, RK4, EulerHeun, meters_to_degrees
 
 # --- ODE term (no key) ---
 def ode_term(t, y, args):
@@ -84,7 +84,7 @@ def perturbed_term(t, y, args, ctrl):
 
 n_fine = 120  # = n_save * round(save_dt / int_dt)
 traj = solve(perturbed_term, y0, t0, n_save=120, int_dt=3600., save_dt=3600.,
-             args=dataset, controls=jax.random.normal(key, (n_fine, 2)))
+             args=dataset, controls=jr.normal(jr.key(0), (n_fine, 2)))
 
 # --- SDE term (pass key) ---
 def sde_term(t, y, args):
@@ -96,12 +96,12 @@ def sde_term(t, y, args):
     return drift, g             # z ~ N(0, I_2) is drawn internally
 
 traj     = solve(sde_term, y0, t0, 120, 3600., 3600., EulerHeun(), args=dataset, key=jr.key(0))
-ensemble = solve(sde_term, dataset, y0, t0, 120, 3600., 3600., EulerHeun(), args=dataset, key=jr.key(0),
+ensemble = solve(sde_term, y0, t0, 120, 3600., 3600., EulerHeun(), args=dataset, key=jr.key(0),
                  n_samples=100)
 # shapes: (121, 2) and (100, 121, 2)
 ```
 
-In SDE mode the solver draws `z ~ N(0, I_2)` and applies `dW = sqrt(dt) * z`
+In SDE mode the solver draws `z ~ N(0, I_2)` and applies `dW = sqrt(int_dt) * z`
 internally; the term never sees `z`. `g` can be shape `(2,)` (diagonal) or
 `(2, 2)` (full matrix). The `Euler`, `Heun`, and `RK4` solvers accept both ODE
 and SDE mode; `ItoMilstein` / `StratonovichMilstein` give strong order 1.0 for

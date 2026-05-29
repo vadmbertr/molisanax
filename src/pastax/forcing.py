@@ -81,8 +81,8 @@ class Field(eqx.Module):
             ``True`` marks a land cell, ``False`` marks ocean. Assumed
             time-invariant (wet-and-dry is out of scope). ``None`` (default)
             means no land logic — ``Field.interp`` is plain bilinear. When
-            a mask is present, coastal interpolation schemes (added in a
-            later iteration) consult it to drop land corners.
+            a mask is present, ``Field.interp`` switches to inverse-distance
+            partial-cell weighting that consults it to drop land corners.
     """
 
     values: Float[Array, "time lat lon"]
