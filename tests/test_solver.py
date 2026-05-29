@@ -316,7 +316,7 @@ class TestSolveODE:
         controls = jnp.zeros((5, 2))
         with pytest.raises(ValueError, match="controls"):
             solve(uniform_sde_term(0.0, 0.0), None, y0, jnp.array(0.0), 5, 1.0, 1.0,
-                  controls=controls, key=jax.random.key(0), n_noise=2)
+                  controls=controls, key=jax.random.key(0))
 
     def test_controls_substep(self):
         # Controls on fine grid; output sliced to n_save+1 points.
@@ -337,14 +337,14 @@ class TestSolveSDE:
     def test_single_sample_shape(self):
         y0 = jnp.zeros(2)
         key = jax.random.key(0)
-        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, jnp.array(0.0), 10, 10.0, 10.0, key=key, n_noise=2)
+        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, jnp.array(0.0), 10, 10.0, 10.0, key=key)
         assert traj.shape == (11, 2)
 
     def test_zero_noise_matches_ode(self):
         y0 = jnp.array([10.0, 20.0])
         key = jax.random.key(0)
         sde_traj = solve(uniform_sde_term(1e-4, 2e-4, noise_scale=0.0), None, y0,
-                         jnp.array(0.0), 50, 10.0, 10.0, key=key, n_noise=2)
+                         jnp.array(0.0), 50, 10.0, 10.0, key=key)
         ode_traj = solve(uniform_ode_term(1e-4, 2e-4), None, y0,
                          jnp.array(0.0), 50, 10.0, 10.0)
         assert jnp.allclose(sde_traj, ode_traj, atol=1e-5)
@@ -354,7 +354,7 @@ class TestSolveSDE:
         y0 = jnp.zeros(2)
         keys = jax.random.split(jax.random.key(0), 7)
         fn = jax.vmap(lambda k: solve(uniform_sde_term(1e-4, 2e-4), None, y0,
-                                      jnp.array(0.0), 10, 10.0, 10.0, key=k, n_noise=2))
+                                      jnp.array(0.0), 10, 10.0, 10.0, key=k))
         ensemble = fn(keys)
         assert ensemble.shape == (7, 11, 2)
         assert jnp.all(jnp.isfinite(ensemble))
@@ -363,37 +363,26 @@ class TestSolveSDE:
         y0 = jnp.zeros(2)
         keys = jax.random.split(jax.random.key(0), 200)
         fn = jax.vmap(lambda k: solve(uniform_sde_term(1e-4, 2e-4, noise_scale=1e-8), None, y0,
-                                      jnp.array(0.0), 10, 10.0, 10.0, key=k, n_noise=2))
+                                      jnp.array(0.0), 10, 10.0, 10.0, key=k))
         ensemble = fn(keys)
         ode_traj = solve(uniform_ode_term(1e-4, 2e-4), None, y0, jnp.array(0.0), 10, 10.0, 10.0)
         assert jnp.allclose(ensemble.mean(axis=0), ode_traj, atol=1e-4)
 
-    def test_missing_n_noise_raises(self):
-        y0 = jnp.zeros(2)
-        with pytest.raises(ValueError, match="n_noise"):
-            solve(uniform_sde_term(0.0, 0.0), None, y0, jnp.array(0.0), 10, 10.0, 10.0,
-                  key=jax.random.key(0))
-
-    def test_missing_key_raises(self):
-        y0 = jnp.zeros(2)
-        with pytest.raises(ValueError):
-            solve(uniform_sde_term(0.0, 0.0), None, y0, jnp.array(0.0), 10, 10.0, 10.0, n_noise=2)
-
     def test_jit_compatible(self):
         y0 = jnp.zeros(2)
         term = uniform_sde_term(1e-4, 2e-4)
-        fn = jax.jit(lambda k: solve(term, None, y0, jnp.array(0.0), 10, 10.0, 10.0, key=k, n_noise=2))
+        fn = jax.jit(lambda k: solve(term, None, y0, jnp.array(0.0), 10, 10.0, 10.0, key=k))
         traj = fn(jax.random.key(0))
         assert traj.shape == (11, 2)
 
     def test_matrix_diffusion(self):
+        # g.shape == (2, 2): full matrix diffusion; z is always (2,).
         def term_mat(t, y, args, z):
             drift = jnp.zeros(2)
-            g = 1e-6 * jnp.array([[1.0, 1.0, 0.0, 0.0],
-                                   [0.0, 0.0, 1.0, 1.0]])
+            g = 1e-6 * jnp.array([[1.0, 0.5], [0.5, 1.0]])
             return drift, g
         y0 = jnp.zeros(2)
-        traj = solve(term_mat, None, y0, jnp.array(0.0), 10, 10.0, 10.0, key=jax.random.key(0), n_noise=4)
+        traj = solve(term_mat, None, y0, jnp.array(0.0), 10, 10.0, 10.0, key=jax.random.key(0))
         assert traj.shape == (11, 2)
         assert jnp.all(jnp.isfinite(traj))
 
@@ -541,7 +530,7 @@ class TestEulerHeun:
     def test_full_solve(self):
         y0 = jnp.zeros(2)
         traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, jnp.array(0.0), 10, 10.0, 10.0,
-                     EulerHeun(), key=jax.random.key(0), n_noise=2)
+                     EulerHeun(), key=jax.random.key(0))
         assert traj.shape == (11, 2)
         assert jnp.all(jnp.isfinite(traj))
 
@@ -598,7 +587,7 @@ class TestItoMilstein:
         sigma = 0.1
         y0 = jnp.array([1.0, 1.0])
         traj = solve(_linear_diffusion_term(sigma), None, y0, jnp.array(0.0), 10, 0.1, 0.1,
-                     ItoMilstein(), key=jax.random.key(0), n_noise=2)
+                     ItoMilstein(), key=jax.random.key(0))
         assert traj.shape == (11, 2)
         assert jnp.all(jnp.isfinite(traj))
 
@@ -632,6 +621,6 @@ class TestStratonovichMilstein:
         sigma = 0.1
         y0 = jnp.array([1.0, 1.0])
         traj = solve(_linear_diffusion_term(sigma), None, y0, jnp.array(0.0), 10, 0.1, 0.1,
-                     StratonovichMilstein(), key=jax.random.key(0), n_noise=2)
+                     StratonovichMilstein(), key=jax.random.key(0))
         assert traj.shape == (11, 2)
         assert jnp.all(jnp.isfinite(traj))

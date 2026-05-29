@@ -634,7 +634,6 @@ def solve(
     *,
     controls: PyTree | None = None,
     key: Key[Array, ""] | None = None,
-    n_noise: int | None = None,
     adjoint: Literal["recursive_checkpoint", "forward"] = "recursive_checkpoint",
 ) -> Float[Array, "time 2"]:
     """Integrate a trajectory for ``n_save`` output intervals starting at ``t0``.
@@ -648,19 +647,19 @@ def solve(
       slices ``controls[i]`` at each step and passes it as the 4th argument to the
       term. The term owns all interpretation and scaling of the controls.
 
-    - **SDE**: pass ``key`` and ``n_noise``. ``term(t, y, args, z) -> (drift, g)``
-      where ``drift`` is the deterministic velocity and ``g`` is the diffusion
-      coefficient (diagonal shape ``(2,)`` or full matrix ``(2, 2)``). The solver
-      draws ``z ~ N(0, I)`` and applies ``dW = sqrt(|int_dt|) * z`` internally.
+    - **SDE**: pass ``key``. ``term(t, y, args, z) -> (drift, g)`` where ``drift``
+      is the deterministic velocity and ``g`` is the diffusion coefficient (diagonal
+      shape ``(2,)`` or full matrix ``(2, 2)``). The solver draws ``z ~ N(0, I_2)``
+      (always size 2) and applies ``dW = sqrt(|int_dt|) * z`` internally.
 
     The solver runs on a fine integration grid of ``n_fine = n_save * n_substeps``
     steps (where ``n_substeps = round(save_dt / int_dt)``), then slices every
     ``n_substeps`` steps to produce the ``n_save + 1`` saved states.
 
     **Ensembles and pre-sampled noise**: use ``jax.vmap`` over ``solve``. For SDE
-    ensembles: ``vmap(lambda k: solve(..., key=k, n_noise=n))(keys)``. For a
-    perturbed ODE with different noise per trajectory: treat it as ODE+controls
-    and ``vmap(lambda c: solve(..., controls=c))(controls_batch)``.
+    ensembles: ``vmap(lambda k: solve(..., key=k))(keys)``. For a perturbed ODE
+    with different noise per trajectory: treat it as ODE+controls and
+    ``vmap(lambda c: solve(..., controls=c))(controls_batch)``.
 
     Args:
         term: Dynamics callable. ODE: ``f(t, y, args)`` or ``f(t, y, args, ctrl)``.
@@ -677,10 +676,9 @@ def solve(
             of ``int_dt`` (same sign). ``n_substeps = round(save_dt / int_dt) >= 1``.
         solver: Solver instance. Defaults to Heun().
         controls: Per-step pytree with leading axis ``n_fine``. For ODE+controls,
-            passed as-is to the term. Cannot be combined with ``key``/``n_noise``.
-        key: PRNG key for SDE mode. Required together with ``n_noise``.
-        n_noise: Dimension of the noise vector ``z`` (SDE only). Required together
-            with ``key``.
+            passed as-is to the term. Cannot be combined with ``key``.
+        key: PRNG key for SDE mode. When provided, draws ``z ~ N(0, I_2)`` of
+            shape ``(n_fine, 2)`` and runs in SDE mode.
         adjoint: AD strategy for ODE mode only. "recursive_checkpoint" uses
             lax.scan (discretise-then-optimise). "forward" is compatible with
             jax.jvp.
@@ -704,12 +702,10 @@ def solve(
     n_fine = n_save * n_substeps
     ts_fine = t0 + jnp.arange(n_fine + 1) * int_dt
 
-    if key is not None or n_noise is not None:
+    if key is not None:
         if controls is not None:
-            raise ValueError("Cannot combine 'controls' with 'key'/'n_noise' (SDE mode).")
-        if key is None or n_noise is None:
-            raise ValueError("SDE mode requires both 'key' and 'n_noise'.")
-        controls = jr.normal(key, shape=(n_fine, n_noise), dtype=y0.dtype)
+            raise ValueError("Cannot combine 'controls' with 'key' (SDE mode).")
+        controls = jr.normal(key, shape=(n_fine, 2), dtype=y0.dtype)
         result = _run_sde(term, args, y0, ts_fine, solver, controls)
     else:
         result = _run_ode(term, args, y0, ts_fine, solver, controls)
