@@ -24,39 +24,36 @@ SDE-only solvers (raise on ``ode_step``):
 
 Term API
 --------
-ODE term: ``f(t, y, args) -> Float[Array, "2"]`` returns velocity
+ODE term: ``f(t, y, args[, ctrl]) -> Float[Array, "2"]`` returns velocity
 [dlat/dt, dlon/dt] in degrees/second.
 
-SDE term: ``f(t, y, args, z) -> tuple[Float[Array, "2"], Float[Array, "..."]]``
+SDE term: ``f(t, y, args[, ctrl]) -> tuple[Float[Array, "2"], Float[Array, "..."]]``
 returns ``(drift, g)``. ``drift`` is the deterministic velocity and ``g`` is
 the diffusion coefficient — the solver applies it as ``dy = drift*dt + g*dW``
-with ``dW = sqrt(|dt|) * z`` internally. Two ``g`` shapes are accepted:
+with ``dW = sqrt(|dt|) * z`` and ``z ~ N(0, I_2)`` drawn internally. The term
+never receives ``z``. Two ``g`` shapes are accepted:
 
 - ``g.shape == (2,)`` — diagonal noise, noise step is ``g * dW`` componentwise.
 - ``g.shape == (2, 2)`` — full 2×2 noise, noise step is ``g @ dW``.
 
-``n_noise`` is always 2 in either case. The Milstein solvers require the
-diagonal form.
+The Milstein solvers require the diagonal form.
 
-The term receives ``z`` so that nonlinear noise models (e.g. Mixture Density Networks, Flow-based Neural Networks)
-can be expressed: set ``g = jnp.zeros(2)`` and fold the noise contribution into
-``drift`` using ``z`` directly. The solver then evolves ``dy = drift*dt`` — a
-random-ODE step rather than a textbook SDE step. Textbook-SDE terms simply
-ignore ``z`` and return state-only ``(drift, g)``. ``ItoMilstein`` and
-``StratonovichMilstein`` assume ``g`` is the true state-only diffusion
-coefficient (their correction is computed from ``∂g/∂y``); they reduce to
-plain Euler-Maruyama when ``g == 0``.
+The optional ``ctrl`` argument is present when ``controls`` is passed to
+:func:`solve`; the solver slices ``controls[i]`` at each step and forwards it
+to the term. The term owns all interpretation and scaling of the slice.
 
 Noise convention
 ----------------
-Per-step Wiener increment is ``dW = sqrt(|dt|) * z`` with ``z ~ N(0, 1)``
-pre-sampled before integration begins. Mode selection: passing any of ``key``,
-``noise``, or ``n_noise`` to :func:`solve` activates SDE mode.
+Per-step Wiener increment is ``dW = sqrt(|dt|) * z`` with ``z ~ N(0, I_2)``
+drawn internally; the SDE term never sees ``z``. Passing ``key`` to
+:func:`solve` activates SDE mode. A single trajectory is produced by default;
+pass ``n_samples > 1`` for an ensemble of independent realisations (returns
+shape ``(n_samples, n_save+1, 2)`` via internal vmap over split keys).
 
-Backwards-in-time integration is supported transparently for ODE solvers:
-pass a strictly decreasing ``ts`` and the solvers step backwards. SDE
-backwards integration is not a textbook construction, but the formula is
-finite because we sign-abs the ``sqrt(dt)`` factor.
+Backwards-in-time integration is supported for all solvers: pass a negative
+``int_dt`` (and matching negative ``save_dt``) to :func:`solve`. SDE backwards
+integration is not a textbook construction, but remains finite because the
+solver sign-abs-normalises the ``sqrt(dt)`` factor.
 """
 
 from __future__ import annotations
@@ -143,13 +140,11 @@ class AbstractSolver(eqx.Module):
         """Advance the SDE state by one step using a pre-sampled ``z``.
 
         Args:
-            term: Stochastic dynamics callable
-                ``f(t, y, args, z) -> (drift, g)``. ``drift`` is the
-                deterministic velocity in degrees per second; ``g`` is the
-                diffusion coefficient with shape ``(2,)`` (diagonal) or
-                ``(2, 2)`` (full). ``z`` is forwarded so nonlinear noise
-                models can use it inside ``drift`` (set ``g = 0`` and use
-                ``z`` directly for a random-ODE step).
+            term: Stochastic dynamics callable ``f(t, y, args) -> (drift, g)``.
+                ``drift`` is the deterministic velocity in degrees per second;
+                ``g`` is the diffusion coefficient with shape ``(2,)``
+                (diagonal) or ``(2, 2)`` (full matrix). The term never sees
+                ``z``; the Wiener increment is applied by the solver.
             t: Current time, in seconds.
             y: Current state ``[lat, lon]`` in degrees.
             dt: Step size in seconds.
@@ -187,7 +182,7 @@ class Euler(AbstractSolver):
         z: Float[Array, "n_noise"],
     ) -> Float[Array, "2"]:
         """One Euler–Maruyama step: ``y + drift*dt + g*dW``."""
-        f, g = term(t, y, args, z)
+        f, g = term(t, y, args)
         dW = jnp.sqrt(jnp.abs(dt)) * z
         return y + f * dt + _apply_g(g, dW)
 
@@ -221,11 +216,11 @@ class Heun(AbstractSolver):
         args: PyTree,
         z: Float[Array, "n_noise"],
     ) -> Float[Array, "2"]:
-        """One Stratonovich Heun step (same ``dW`` and ``z`` in predictor and corrector)."""
-        f0, g0 = term(t, y, args, z)
+        """One Stratonovich Heun step (same ``dW`` in predictor and corrector)."""
+        f0, g0 = term(t, y, args)
         dW = jnp.sqrt(jnp.abs(dt)) * z
         v0 = f0 * dt + _apply_g(g0, dW)
-        f1, g1 = term(t + dt, y + v0, args, z)
+        f1, g1 = term(t + dt, y + v0, args)
         v1 = f1 * dt + _apply_g(g1, dW)
         return y + 0.5 * (v0 + v1)
 
@@ -263,12 +258,12 @@ class RK4(AbstractSolver):
         args: PyTree,
         z: Float[Array, "n_noise"],
     ) -> Float[Array, "2"]:
-        """One stochastic RK4 step (Stratonovich, single ``dW`` and ``z`` across stages)."""
+        """One stochastic RK4 step (Stratonovich, single ``dW`` across stages)."""
         half = dt * 0.5
         dW = jnp.sqrt(jnp.abs(dt)) * z
 
         def velocity(t_, y_):
-            f_, g_ = term(t_, y_, args, z)
+            f_, g_ = term(t_, y_, args)
             return f_ * dt + _apply_g(g_, dW)
 
         v1 = velocity(t,        y)
@@ -449,11 +444,11 @@ class EulerHeun(AbstractSolver):
         z: Float[Array, "n_noise"],
     ) -> Float[Array, "2"]:
         """One stochastic Euler–Heun step."""
-        f0, g0 = term(t, y, args, z)
+        f0, g0 = term(t, y, args)
         dW = jnp.sqrt(jnp.abs(dt)) * z
         diff0 = _apply_g(g0, dW)
         y_pred = y + diff0
-        _, g1 = term(t + dt, y_pred, args, z)
+        _, g1 = term(t + dt, y_pred, args)
         diff1 = _apply_g(g1, dW)
         return y + f0 * dt + 0.5 * (diff0 + diff1)
 
@@ -465,19 +460,14 @@ def _milstein_correction(
     args: PyTree,
     g: Float[Array, "2"],
     dW: Float[Array, "n_noise"],
-    z: Float[Array, "n_noise"],
 ) -> Float[Array, "2"]:
     """Diagonal-noise Milstein cross-term ``0.5 * g * (∂g/∂y_i) * dW^2``.
 
     Returns the ``0.5 * g * (∂g_i/∂y_i) * dW**2`` vector (Stratonovich form).
     Itô subtracts ``0.5 * g * (∂g_i/∂y_i) * dt`` on top.
-
-    ``z`` is forwarded to ``term`` so nonlinear noise terms keep the same
-    signature; only ``g`` (which should be state-only) influences the
-    derivative computed via :func:`jax.jacfwd` here.
     """
     def g_fn(y_):
-        _, g_out = term(t, y_, args, z)
+        _, g_out = term(t, y_, args)
         return g_out
 
     dgdy = jax.jacfwd(g_fn)(y)            # (2, 2)
@@ -515,16 +505,16 @@ class ItoMilstein(AbstractSolver):
         z: Float[Array, "n_noise"],
     ) -> Float[Array, "2"]:
         """One Itô Milstein step: ``y + f*dt + g*dW + 0.5*g*(∂g/∂y)*(dW**2 - dt)``."""
-        f, g = term(t, y, args, z)
+        f, g = term(t, y, args)
         if g.ndim != 1:
             raise NotImplementedError(
                 "ItoMilstein requires diagonal noise (g.shape == (2,)); "
                 f"got g.shape == {g.shape}. Use EulerHeun for matrix diffusion."
             )
         dW = jnp.sqrt(jnp.abs(dt)) * z
-        cross = _milstein_correction(term, t, y, args, g, dW, z)
+        cross = _milstein_correction(term, t, y, args, g, dW)
         def g_fn(y_):
-            _, g_out = term(t, y_, args, z)
+            _, g_out = term(t, y_, args)
             return g_out
         dgdy_diag = jnp.diag(jax.jacfwd(g_fn)(y))
         ito_drift = -0.5 * g * dgdy_diag * dt
@@ -561,14 +551,14 @@ class StratonovichMilstein(AbstractSolver):
         z: Float[Array, "n_noise"],
     ) -> Float[Array, "2"]:
         """One Stratonovich Milstein step: ``y + f*dt + g*dW + 0.5*g*(∂g/∂y)*dW**2``."""
-        f, g = term(t, y, args, z)
+        f, g = term(t, y, args)
         if g.ndim != 1:
             raise NotImplementedError(
                 "StratonovichMilstein requires diagonal noise (g.shape == (2,)); "
                 f"got g.shape == {g.shape}. Use EulerHeun for matrix diffusion."
             )
         dW = jnp.sqrt(jnp.abs(dt)) * z
-        cross = _milstein_correction(term, t, y, args, g, dW, z)
+        cross = _milstein_correction(term, t, y, args, g, dW)
         return y + f * dt + g * dW + cross
 
 
@@ -578,15 +568,27 @@ def _run_ode(
     y0: Float[Array, "2"],
     ts: Float[Array, " time"],
     solver: AbstractSolver,
+    controls: PyTree | None = None,
 ) -> Float[Array, "time 2"]:
     dt = ts[1] - ts[0]
 
-    @jax.checkpoint
-    def body(y: Float[Array, "2"], t: Float[Array, ""]) -> tuple:
-        y_new = solver.ode_step(term, t, y, dt, args)
-        return y_new, y_new
+    if controls is None:
+        @jax.checkpoint
+        def body(y: Float[Array, "2"], t: Float[Array, ""]) -> tuple:
+            y_new = solver.ode_step(term, t, y, dt, args)
+            return y_new, y_new
 
-    _, ys = jax.lax.scan(body, y0, ts[:-1])
+        _, ys = jax.lax.scan(body, y0, ts[:-1])
+    else:
+        @jax.checkpoint
+        def body(y: Float[Array, "2"], inputs: tuple) -> tuple:
+            t, ctrl = inputs
+            bound = lambda t_, y_, a_: term(t_, y_, a_, ctrl)
+            y_new = solver.ode_step(bound, t, y, dt, args)
+            return y_new, y_new
+
+        _, ys = jax.lax.scan(body, y0, (ts[:-1], controls))
+
     return jnp.concatenate([y0[None], ys], axis=0)
 
 
@@ -596,117 +598,121 @@ def _run_sde(
     y0: Float[Array, "2"],
     ts: Float[Array, " time"],
     solver: AbstractSolver,
-    noise: Float[Array, "samples steps n_noise"],
-) -> Float[Array, "samples time 2"]:
-    """Integrate an SDE ensemble. noise must be pre-sampled: shape (S, n_steps, n_noise)."""
+    z_seq: Float[Array, "steps 2"],
+    controls: PyTree | None = None,
+) -> Float[Array, "time 2"]:
     dt = ts[1] - ts[0]
 
-    def solve_one(noise_i: Float[Array, "steps n_noise"]) -> Float[Array, "time 2"]:
+    if controls is None:
         @jax.checkpoint
         def body(y: Float[Array, "2"], inputs: tuple) -> tuple:
             t, z = inputs
             y_new = solver.sde_step(term, t, y, dt, args, z)
             return y_new, y_new
 
-        _, ys = jax.lax.scan(body, y0, (ts[:-1], noise_i))
-        return jnp.concatenate([y0[None], ys], axis=0)
+        _, ys = jax.lax.scan(body, y0, (ts[:-1], z_seq))
+    else:
+        @jax.checkpoint
+        def body(y: Float[Array, "2"], inputs: tuple) -> tuple:
+            t, z, ctrl = inputs
+            bound = lambda t_, y_, a_: term(t_, y_, a_, ctrl)
+            y_new = solver.sde_step(bound, t, y, dt, args, z)
+            return y_new, y_new
 
-    return jax.vmap(solve_one)(noise)
+        _, ys = jax.lax.scan(body, y0, (ts[:-1], z_seq, controls))
+
+    return jnp.concatenate([y0[None], ys], axis=0)
 
 
 def solve(
     term: Callable,
     args: PyTree,
     y0: Float[Array, "2"],
-    ts: Float[Array, " time"],
+    t0: Float[Array, ""],
+    n_save: int,
+    int_dt: float,
+    save_dt: float,
     solver: AbstractSolver | None = None,
     *,
+    controls: PyTree | None = None,
     key: Key[Array, ""] | None = None,
-    n_samples: int | None = None,
-    n_noise: int | None = None,
-    noise: Float[Array, "..."] | None = None,
+    n_samples: int = 1,
     adjoint: Literal["recursive_checkpoint", "forward"] = "recursive_checkpoint",
-) -> Float[Array, "time 2"] | Float[Array, "samples time 2"]:
-    """Integrate a trajectory from ts[0] to ts[-1] with constant step size.
+) -> Array:
+    """Integrate a trajectory for ``n_save`` output intervals starting at ``t0``.
 
-    Mode is selected by the caller:
+    ODE mode (default, no ``key``): ``term(t, y, args[, ctrl])`` returns velocity.
+    SDE mode (pass ``key``): ``term(t, y, args[, ctrl])`` returns ``(drift, g)``;
+    the solver draws ``z ~ N(0, I_2)`` and applies ``dW = sqrt(|int_dt|) * z``
+    internally. The optional ``ctrl`` argument is present when ``controls`` is
+    provided — the solver slices it at each step; the term owns its interpretation.
 
-    - **ODE** (default): none of ``key``, ``noise``, or ``n_noise`` are passed.
-      ``term(t, y, args) -> Float[Array, "2"]`` returns velocity.
+    The solver runs on a fine integration grid of ``n_fine = n_save * n_substeps``
+    steps (where ``n_substeps = round(save_dt / int_dt)``), then slices every
+    ``n_substeps`` steps to produce the ``n_save + 1`` saved states.
 
-    - **SDE**: at least one of ``key``, ``noise``, or ``n_noise`` is passed.
-      ``term(t, y, args, z) -> (drift, g)`` where ``drift`` is the
-      deterministic velocity and ``g`` is the diffusion coefficient.
-      ``g`` may be diagonal (shape ``(2,)``) or a full matrix (shape
-      ``(2, 2)``). The solver applies ``dW = sqrt(|dt|) * z`` internally.
-      Nonlinear noise models (e.g. an MDN-style residual) can be expressed by
-      using ``z`` inside ``drift`` and returning ``g = jnp.zeros(2)``; the
-      solver then evolves ``dy = drift*dt`` — a random-ODE step.
-
-    Noise for SDE mode can be supplied in two ways:
-
-    1. **Pre-sampled** (recommended): pass ``noise`` directly.
-       - Shape ``(n_steps, n_noise)`` → single realisation, returns ``(T, 2)``.
-       - Shape ``(S, n_steps, n_noise)`` → ensemble, returns ``(S, T, 2)``.
-       ``key`` and ``n_noise`` are not needed when ``noise`` is provided.
-
-    2. **Auto-sampled**: pass ``key`` and ``n_noise`` (and optionally
-       ``n_samples``). A single ``jax.random.normal`` call draws the full
-       ``(n_samples, n_steps, n_noise)`` array before vmap and scan.
+    **Ensemble**: pass ``n_samples > 1`` in SDE mode; the key is split internally.
+    **Perturbed ODE**: use ODE+controls and
+    ``jax.vmap(lambda c: solve(..., controls=c))(controls_batch)``.
 
     Args:
-        term: Dynamics callable. ODE: ``f(t, y, args)``. SDE:
-            ``f(t, y, args, z)`` returning ``(drift, g)``.
+        term: Dynamics callable ``f(t, y, args[, ctrl])``. ODE: returns velocity.
+            SDE: returns ``(drift, g)`` where ``g`` is the diffusion coefficient,
+            shape ``(2,)`` diagonal or ``(2, 2)`` full matrix.
         args: Arbitrary JAX pytree passed through to term (e.g. a Dataset).
         y0: Initial state [lat, lon] in degrees, shape (2,).
-        ts: Equally spaced output times in seconds, shape (T,).
+        t0: Start time in seconds. JAX scalar — can change between calls without
+            recompilation. The implicit end time is ``t0 + n_save * save_dt``.
+        n_save: Number of output intervals (static). Output has shape
+            ``(n_save + 1, 2)`` including the initial state.
+        int_dt: Integration step size in seconds (static). Use a negative value
+            for backward-in-time integration.
+        save_dt: Output interval in seconds (static). Must be an integer multiple
+            of ``int_dt`` (same sign). ``n_substeps = round(save_dt / int_dt) >= 1``.
         solver: Solver instance. Defaults to Heun().
-        key: PRNG key for auto-sampling noise (SDE only). Required when ``noise``
-            is None and ``n_noise`` is provided.
-        n_samples: Number of realisations for auto-sampled SDE. Defaults to 1 when
-            ``n_noise`` is provided.
-        n_noise: Dimension of the noise vector ``z``. Required for auto-sampling;
-            inferred from ``noise.shape[-1]`` when pre-sampled noise is provided.
-            For the current solver lineup this is always 2.
-        noise: Pre-sampled noise array of shape ``(n_steps, n_noise)`` (single) or
-            ``(S, n_steps, n_noise)`` (ensemble). When provided, ``key`` and
-            ``n_noise`` are not used.
+        controls: Per-step pytree with leading axis ``n_fine``. Sliced at each
+            integration step and forwarded as the 4th argument to the term, in
+            both ODE and SDE modes.
+        key: PRNG key for SDE mode. When provided, draws ``z ~ N(0, I_2)`` of
+            shape ``(n_fine, 2)`` and runs in SDE mode.
+        n_samples: Number of independent SDE realisations (default 1). Ignored in
+            ODE mode. When > 1, the key is split and trajectories are vmapped;
+            output shape is ``(n_samples, n_save + 1, 2)``.
         adjoint: AD strategy for ODE mode only. "recursive_checkpoint" uses
             lax.scan (discretise-then-optimise). "forward" is compatible with
             jax.jvp.
 
     Returns:
-        - ODE: shape ``(T, 2)``.
-        - SDE, single realisation: shape ``(T, 2)``.
-        - SDE, ensemble: shape ``(S, T, 2)``.
+        Shape ``(n_save + 1, 2)`` in ODE mode or SDE with ``n_samples == 1``.
+        Shape ``(n_samples, n_save + 1, 2)`` in SDE mode with ``n_samples > 1``.
     """
     if solver is None:
         solver = Heun()
 
-    # ODE mode: none of the SDE-specific arguments are provided.
-    if key is None and noise is None and n_noise is None:
-        return _run_ode(term, args, y0, ts, solver)
-
-    # SDE path — normalise noise to (S, n_steps, n_noise) then run once.
-    n_steps = ts.shape[0] - 1
-
-    if noise is not None:
-        squeeze = noise.ndim == 2          # single realisation → remove S axis on output
-        noise_3d = noise[None] if squeeze else noise
-    elif key is not None:
-        if n_noise is None:
-            raise ValueError(
-                "SDE mode: 'n_noise' is required when auto-sampling noise via 'key'. "
-                "Pass n_noise=<latent dimension> or provide pre-sampled 'noise' instead."
-            )
-        squeeze = n_samples is None
-        n = 1 if squeeze else n_samples
-        noise_3d = jr.normal(key, shape=(n, n_steps, n_noise), dtype=y0.dtype)
-    else:
+    n_substeps = round(save_dt / int_dt)
+    if n_substeps < 1:
         raise ValueError(
-            "SDE mode (n_noise was provided) but neither 'key' nor 'noise' was given. "
-            "Pass key=jax.random.key(seed) or noise=jnp.array(...)."
+            f"save_dt/int_dt must be >= 1 (got {n_substeps}). "
+            "For backward integration both int_dt and save_dt must be negative."
         )
+    if abs(n_substeps * int_dt - save_dt) > 1e-8 * abs(save_dt):
+        raise ValueError(
+            f"save_dt ({save_dt}) must be an integer multiple of int_dt ({int_dt})."
+        )
+    n_fine = n_save * n_substeps
+    ts_fine = t0 + jnp.arange(n_fine + 1) * int_dt
 
-    ensemble = _run_sde(term, args, y0, ts, solver, noise_3d)
-    return ensemble[0] if squeeze else ensemble
+    if key is not None:
+        if n_samples == 1:
+            z = jr.normal(key, shape=(n_fine, 2), dtype=y0.dtype)
+            result = _run_sde(term, args, y0, ts_fine, solver, z, controls)
+            return result[::n_substeps]
+        else:
+            keys = jr.split(key, n_samples)
+            def _single(k):
+                z = jr.normal(k, shape=(n_fine, 2), dtype=y0.dtype)
+                return _run_sde(term, args, y0, ts_fine, solver, z, controls)[::n_substeps]
+            return jax.vmap(_single)(keys)
+    else:
+        result = _run_ode(term, args, y0, ts_fine, solver, controls)
+        return result[::n_substeps]
