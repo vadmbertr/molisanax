@@ -1,8 +1,7 @@
 pastax
 =========
 
-Public API surface — every exported function and class, generated from
-the source by ``sphinx.ext.autodoc`` with Google-style docstrings.
+Public API surface.
 
 .. toctree::
    :hidden:
@@ -14,7 +13,6 @@ the source by ``sphinx.ext.autodoc`` with Google-style docstrings.
    interpolation
    metric
    score
-   safe_math
 
 * :doc:`pastax.solver <solver>`
 * :doc:`pastax.forcing <forcing>`
@@ -23,4 +21,3 @@ the source by ``sphinx.ext.autodoc`` with Google-style docstrings.
 * :doc:`pastax.interpolation <interpolation>`
 * :doc:`pastax.metric <metric>`
 * :doc:`pastax.score <score>`
-* :doc:`pastax safe math <safe_math>`
