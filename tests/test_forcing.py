@@ -466,9 +466,10 @@ class TestDatasetCGrid:
             v = ds["v"].interp(t_, y[0], y[1])
             return jnp.array([v, u])  # [dlat/dt, dlon/dt]
 
-        ts = jnp.linspace(0.0, T, 501)
+        n_save = 500
+        dt = T / n_save
         y0 = jnp.array([2.0, 2.0], dtype=jnp.float32)
-        traj = solve(term, dataset, y0, ts, solver=Heun())
+        traj = solve(term, y0, jnp.array(0.0), n_save, dt, dt, solver=Heun(), args=dataset)
 
         lat_final = float(traj[-1, 0])
         lon_final = float(traj[-1, 1])

@@ -475,9 +475,8 @@ class TestAlongshoreJetNoStuckParticle:
     def test_unmasked_particle_gets_stuck_near_coast(self):
         from pastax import Heun, solve
         ds = self._dataset(with_mask=False)
-        ts = jnp.linspace(0.0, 5.0, 11)  # 5 seconds
         y0 = jnp.array([0.1, 0.5], dtype=jnp.float32)  # just above coast
-        traj = solve(self._term(), ds, y0, ts, solver=Heun())
+        traj = solve(self._term(), y0, jnp.array(0.0), 10, 0.5, 0.5, solver=Heun(), args=ds)  # 5 seconds
         # With naive bilinear, the lat=0 land row pulls U down: at lat=0.1
         # (close to coast) U≈0.1*0.1≈0.01 deg/s, so dlon ≈ 0.05 over 5 s.
         dlon_unmasked = float(traj[-1, 1] - traj[0, 1])
@@ -486,9 +485,8 @@ class TestAlongshoreJetNoStuckParticle:
     def test_masked_particle_slides_along_coast(self):
         from pastax import Heun, solve
         ds = self._dataset(with_mask=True)
-        ts = jnp.linspace(0.0, 5.0, 11)
         y0 = jnp.array([0.1, 0.5], dtype=jnp.float32)
-        traj = solve(self._term(), ds, y0, ts, solver=Heun())
+        traj = solve(self._term(), y0, jnp.array(0.0), 10, 0.5, 0.5, solver=Heun(), args=ds)
         # With the mask + invdist, the land row is dropped: the particle
         # sees the ocean U=0.1 unattenuated. Over 5 s → 0.5 deg east.
         dlon_masked = float(traj[-1, 1] - traj[0, 1])
@@ -524,9 +522,8 @@ class TestClosedBay:
                  ds_["u"].interp(t, y[0], y[1])]
             )
 
-        ts = jnp.linspace(0.0, 100.0, 11)
         y0 = jnp.array([2.0, 2.0], dtype=jnp.float32)  # dead centre of the bay
-        traj = solve(term, ds, y0, ts, solver=Heun())
+        traj = solve(term, y0, jnp.array(0.0), 10, 10.0, 10.0, solver=Heun(), args=ds)
         # Final position equals start (zero velocity all along).
         assert float(traj[-1, 0]) == pytest.approx(2.0, abs=1e-5)
         assert float(traj[-1, 1]) == pytest.approx(2.0, abs=1e-5)

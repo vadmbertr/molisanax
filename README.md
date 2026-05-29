@@ -8,16 +8,16 @@
 
 ## Project Status
 
-- Bilinear interpolation of rectilinear forcing fields, with neighbourhood  cube extraction
+- Bilinear interpolation of rectilinear forcing fields, with neighbourhood cube extraction
 - A-grid and NEMO-convention Arakawa C-grid forcing layouts (`Dataset.from_arrays_cgrid` / `from_xarray_cgrid`)
 - Coastal robustness on A-grid: NaN-inferred land masks, inverse-distance partial-cell bilinear, and an opt-in partial-slip scheme via `Dataset.velocity_interp`
-- Unified `solve()` function — ODE / ODE-with-controls / SDE mode selected by caller
-- ODE solvers: Euler, Heun, RK4, Tsit5, Dopri5. SDE solvers: Euler-Maruyama, Stratonovich Heun, Stratonovich RK4 via the ODE classes, plus dedicated EulerHeun, ItoMilstein, and StratonovichMilstein. SDE term has signature `term(t, y, args, z) -> (drift, g)`; the solver draws `z ~ N(0, I_2)` and applies `dW = sqrt(dt) * z` internally
-- Per-step `controls` pytree for ODE terms that need time-varying external inputs (perturbed ODEs, data-driven forcing, etc.)
+- Unified `solve` function — ODE / ODE-with-controls / SDE mode selected by caller
+- Unified `term` API for specifying the dynamics. ODE terms have signature `term(t, y[, args, ctrl]) -> velocity`. SDE terms have signature `term(t, y[, args, ctrl]) -> (drift, g)`. `args` is a Pytree fixed for the entire integration; `ctrl` is a per-step time-varying Pytree, useful when the term requires external time-varying inputs
+- ODE solvers: Euler, Heun, RK4, Tsit5, Dopri5. SDE solvers: Euler-Maruyama, Stratonovich Heun, Stratonovich RK4 via the ODE classes, plus dedicated EulerHeun, ItoMilstein, and StratonovichMilstein; SDE solvers draw `z ~ N(0, I_2)` and applies `dW = sqrt(int_dt) * z` internally
 - Forward or backwards-in-time integration (pass negative `int_dt` / `save_dt`)
 - Geographic unit conversions (metres ↔ degrees)
 - Along-trajectory metrics with optional ensemble (vmap) mode
-- (Proper) Scoring rules to evaluate and train stochastic simulators
+- Proper scoring rules to evaluate and train stochastic simulators
 - xarray (zarr/netCDF) dataset loading
 
 ## Installation
@@ -37,22 +37,26 @@ cd pastax
 pip install -e ".[dev]"
 ```
 
-Installing a JAX **GPU version** should be done prior to installing `pastax`, following [https://docs.jax.dev/en/latest/installation.html](https://docs.jax.dev/en/latest/installation.html).
+Installing a JAX **GPU version** should be done prior to installing `pastax`, following
+[https://docs.jax.dev/en/latest/installation.html](https://docs.jax.dev/en/latest/installation.html).
 
 ## Quick Start
 
 ### ODE and SDE simulation
 
-The term signature is `term(t, y, args[, ctrl])`. Without `key` it is ODE mode
-and the term returns a velocity; with `key` it is SDE mode and the term returns
-`(drift, g)`. The optional `ctrl` argument is present when `controls` is passed
-to `solve()` — the solver slices `controls[i]` at each step and forwards it; the
-term owns all interpretation.
+The term signature is `term(t, y[, args, ctrl])`.
+The optional `args` argument is present when `args` is passed to `solve`.
+The optional `ctrl` argument is present when `controls` is passed to `solve`
+— the solver slices `controls[i]` at each step and forwards it.
+The term owns all interpretation of `args` and `ctrl`.
 
 `t0` is a traced JAX scalar — changing it never triggers recompilation. `n_save`,
 `int_dt`, and `save_dt` are static Python scalars; the end time is implicit as
 `t0 + n_save * save_dt`. Sub-stepping is expressed by setting `int_dt < save_dt`
 with `save_dt / int_dt` an integer.
+
+Without `key` passed to `solve` it is ODE mode and the term returns a velocity;
+with `key` it is SDE mode and the term returns `(drift, g)`.
 
 ```python
 import jax.numpy as jnp
@@ -60,7 +64,7 @@ import jax.random as jr
 from pastax import solve, Heun, EulerHeun, meters_to_degrees
 
 # --- ODE term (no key) ---
-def my_ode_term(t, y, args):
+def ode_term(t, y, args):
     dataset = args
     u = dataset["u"].interp(t, y[0], y[1])
     v = dataset["v"].interp(t, y[0], y[1])
@@ -68,31 +72,32 @@ def my_ode_term(t, y, args):
 
 y0 = jnp.array([48.0, -4.0])   # [lat, lon]
 t0 = jnp.array(0.0)            # start time, seconds
-traj = solve(my_ode_term, dataset, y0, t0, n_save=120, int_dt=3600., save_dt=3600.)
+traj = solve(ode_term, y0, t0, n_save=120, int_dt=3600., save_dt=3600., args=dataset)
 # shape (121, 2)
 
 # --- ODE term with per-step controls ---
 def perturbed_term(t, y, args, ctrl):
     dataset = args
+    z = ctrl
     base_vel = ...
-    return base_vel + 1e-4 * jnp.tanh(ctrl)
+    return base_vel + 1e-4 * jnp.tanh(z)
 
 n_fine = 120  # = n_save * round(save_dt / int_dt)
-traj = solve(perturbed_term, dataset, y0, t0, n_save=120, int_dt=3600., save_dt=3600.,
-             controls=jax.random.normal(key, (n_fine, 2)))
+traj = solve(perturbed_term, y0, t0, n_save=120, int_dt=3600., save_dt=3600.,
+             args=dataset, controls=jax.random.normal(key, (n_fine, 2)))
 
 # --- SDE term (pass key) ---
-def my_sde_term(t, y, args):
+def sde_term(t, y, args):
     dataset = args
     u = dataset["u"].interp(t, y[0], y[1])
     v = dataset["v"].interp(t, y[0], y[1])
     drift = meters_to_degrees(jnp.array([v, u]), y[0])
     g     = jnp.full(2, 1e-5)   # diagonal diffusion, deg / sqrt(s)
-    return drift, g              # z ~ N(0, I_2) is drawn internally
+    return drift, g             # z ~ N(0, I_2) is drawn internally
 
-traj     = solve(my_sde_term, dataset, y0, t0, 120, 3600., 3600., EulerHeun(), key=jr.key(0))
-ensemble = solve(my_sde_term, dataset, y0, t0, 120, 3600., 3600., EulerHeun(),
-                 key=jr.key(0), n_samples=100)
+traj     = solve(sde_term, y0, t0, 120, 3600., 3600., EulerHeun(), args=dataset, key=jr.key(0))
+ensemble = solve(sde_term, dataset, y0, t0, 120, 3600., 3600., EulerHeun(), args=dataset, key=jr.key(0),
+                 n_samples=100)
 # shapes: (121, 2) and (100, 121, 2)
 ```
 
@@ -254,9 +259,10 @@ this transparently:
 
 ```python
 y0_end = jnp.array([48.0, -4.0])
-backtrack = solve(my_term, dataset, y0_end,
+backtrack = solve(my_term, y0_end,
                   t0=jnp.array(86400.0 * 5), n_save=120, int_dt=-3600., save_dt=-3600.,
-                  solver=RK4())
+                  solver=RK4(),
+                  args=dataset)
 # backtrack[-1] is the source position 5 days earlier.
 ```
 
@@ -266,11 +272,11 @@ backtrack = solve(my_term, dataset, y0_end,
 import jax
 
 # Reverse-mode gradient through the ODE solver
-grad = jax.grad(lambda y0: solve(my_ode_term, dataset, y0, t0, n_save, int_dt, save_dt).sum())(y0)
+grad = jax.grad(lambda y0: solve(ode_term, y0, t0, n_save, int_dt, save_dt, args=dataset).sum())(y0)
 
 # Forward-mode JVP
 traj, tangent = jax.jvp(
-    lambda y0: solve(my_ode_term, dataset, y0, t0, n_save, int_dt, save_dt),
+    lambda y0: solve(ode_term, y0, t0, n_save, int_dt, save_dt, args=dataset),
     (y0,), (jnp.ones(2),),
 )
 ```
@@ -290,7 +296,7 @@ sep_ens = separation_distance(ensemble, reference, ensemble=True)  # (S, T)
 li_ens  = liu_index(ensemble, reference, ensemble=True)            # (S, T)
 ```
 
-### (Proper) Scoring rules
+### Scoring rules
 
 ```python
 from pastax import dawid_sebastiani, energy_score, squared_error, variogram_score

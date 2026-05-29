@@ -106,11 +106,10 @@ class TestPartialSlipScheme:
         def term(t, y, args):
             return args.velocity_interp(t, y[0], y[1], scheme="partialslip")
 
-        ts = jnp.linspace(0.0, 5.0, 11)
         # Particle starts at lat=0.1 above a coast (dlat=1 between rows
         # → wl=0.1). Partial-slip factor = 0.5 + 0.5*0.1 = 0.55.
         y0 = jnp.array([0.1, 0.5], dtype=jnp.float32)
-        traj = solve(term, ds, y0, ts, solver=Heun())
+        traj = solve(term, y0, jnp.array(0.0), 10, 0.5, 0.5, solver=Heun(), args=ds)
         dlon = float(traj[-1, 1] - traj[0, 1])
         # Expected ≈ 0.55 * 0.1 deg/s * 5 s = 0.275 deg
         assert dlon == pytest.approx(0.275, rel=0.10)
