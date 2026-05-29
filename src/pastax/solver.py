@@ -618,7 +618,10 @@ def solve(
     term: Callable,
     args: PyTree,
     y0: Float[Array, "2"],
-    ts: Float[Array, " time"],
+    t0: Float[Array, ""],
+    n_save: int,
+    int_dt: float,
+    save_dt: float,
     solver: AbstractSolver | None = None,
     *,
     key: Key[Array, ""] | None = None,
@@ -627,7 +630,7 @@ def solve(
     noise: Float[Array, "..."] | None = None,
     adjoint: Literal["recursive_checkpoint", "forward"] = "recursive_checkpoint",
 ) -> Float[Array, "time 2"] | Float[Array, "samples time 2"]:
-    """Integrate a trajectory from ts[0] to ts[-1] with constant step size.
+    """Integrate a trajectory for ``n_save`` output intervals starting at ``t0``.
 
     Mode is selected by the caller:
 
@@ -643,23 +646,34 @@ def solve(
       using ``z`` inside ``drift`` and returning ``g = jnp.zeros(2)``; the
       solver then evolves ``dy = drift*dt`` — a random-ODE step.
 
+    The solver runs on a fine integration grid of ``n_fine = n_save * n_substeps``
+    steps (where ``n_substeps = round(save_dt / int_dt)``), then slices every
+    ``n_substeps`` steps to produce the ``n_save + 1`` saved states.
+
     Noise for SDE mode can be supplied in two ways:
 
     1. **Pre-sampled** (recommended): pass ``noise`` directly.
-       - Shape ``(n_steps, n_noise)`` → single realisation, returns ``(T, 2)``.
-       - Shape ``(S, n_steps, n_noise)`` → ensemble, returns ``(S, T, 2)``.
+       - Shape ``(n_fine, n_noise)`` → single realisation, returns ``(n_save+1, 2)``.
+       - Shape ``(S, n_fine, n_noise)`` → ensemble, returns ``(S, n_save+1, 2)``.
        ``key`` and ``n_noise`` are not needed when ``noise`` is provided.
 
     2. **Auto-sampled**: pass ``key`` and ``n_noise`` (and optionally
        ``n_samples``). A single ``jax.random.normal`` call draws the full
-       ``(n_samples, n_steps, n_noise)`` array before vmap and scan.
+       ``(n_samples, n_fine, n_noise)`` array before vmap and scan.
 
     Args:
         term: Dynamics callable. ODE: ``f(t, y, args)``. SDE:
             ``f(t, y, args, z)`` returning ``(drift, g)``.
         args: Arbitrary JAX pytree passed through to term (e.g. a Dataset).
         y0: Initial state [lat, lon] in degrees, shape (2,).
-        ts: Equally spaced output times in seconds, shape (T,).
+        t0: Start time in seconds. JAX scalar — can change between calls without
+            recompilation. The implicit end time is ``t0 + n_save * save_dt``.
+        n_save: Number of output intervals (static). Output has shape
+            ``(n_save + 1, 2)`` including the initial state.
+        int_dt: Integration step size in seconds (static). Use a negative value
+            for backward-in-time integration.
+        save_dt: Output interval in seconds (static). Must be an integer multiple
+            of ``int_dt`` (same sign). ``n_substeps = round(save_dt / int_dt) >= 1``.
         solver: Solver instance. Defaults to Heun().
         key: PRNG key for auto-sampling noise (SDE only). Required when ``noise``
             is None and ``n_noise`` is provided.
@@ -668,28 +682,40 @@ def solve(
         n_noise: Dimension of the noise vector ``z``. Required for auto-sampling;
             inferred from ``noise.shape[-1]`` when pre-sampled noise is provided.
             For the current solver lineup this is always 2.
-        noise: Pre-sampled noise array of shape ``(n_steps, n_noise)`` (single) or
-            ``(S, n_steps, n_noise)`` (ensemble). When provided, ``key`` and
+        noise: Pre-sampled noise array of shape ``(n_fine, n_noise)`` (single) or
+            ``(S, n_fine, n_noise)`` (ensemble). When provided, ``key`` and
             ``n_noise`` are not used.
         adjoint: AD strategy for ODE mode only. "recursive_checkpoint" uses
             lax.scan (discretise-then-optimise). "forward" is compatible with
             jax.jvp.
 
     Returns:
-        - ODE: shape ``(T, 2)``.
-        - SDE, single realisation: shape ``(T, 2)``.
-        - SDE, ensemble: shape ``(S, T, 2)``.
+        - ODE: shape ``(n_save + 1, 2)``.
+        - SDE, single realisation: shape ``(n_save + 1, 2)``.
+        - SDE, ensemble: shape ``(S, n_save + 1, 2)``.
     """
     if solver is None:
         solver = Heun()
 
+    n_substeps = round(save_dt / int_dt)
+    if n_substeps < 1:
+        raise ValueError(
+            f"save_dt/int_dt must be >= 1 (got {n_substeps}). "
+            "For backward integration both int_dt and save_dt must be negative."
+        )
+    if abs(n_substeps * int_dt - save_dt) > 1e-8 * abs(save_dt):
+        raise ValueError(
+            f"save_dt ({save_dt}) must be an integer multiple of int_dt ({int_dt})."
+        )
+    n_fine = n_save * n_substeps
+    ts_fine = t0 + jnp.arange(n_fine + 1) * int_dt
+
     # ODE mode: none of the SDE-specific arguments are provided.
     if key is None and noise is None and n_noise is None:
-        return _run_ode(term, args, y0, ts, solver)
+        fine_result = _run_ode(term, args, y0, ts_fine, solver)
+        return fine_result[::n_substeps]
 
-    # SDE path — normalise noise to (S, n_steps, n_noise) then run once.
-    n_steps = ts.shape[0] - 1
-
+    # SDE path — normalise noise to (S, n_fine, n_noise) then run once.
     if noise is not None:
         squeeze = noise.ndim == 2          # single realisation → remove S axis on output
         noise_3d = noise[None] if squeeze else noise
@@ -701,12 +727,13 @@ def solve(
             )
         squeeze = n_samples is None
         n = 1 if squeeze else n_samples
-        noise_3d = jr.normal(key, shape=(n, n_steps, n_noise), dtype=y0.dtype)
+        noise_3d = jr.normal(key, shape=(n, n_fine, n_noise), dtype=y0.dtype)
     else:
         raise ValueError(
             "SDE mode (n_noise was provided) but neither 'key' nor 'noise' was given. "
             "Pass key=jax.random.key(seed) or noise=jnp.array(...)."
         )
 
-    ensemble = _run_sde(term, args, y0, ts, solver, noise_3d)
-    return ensemble[0] if squeeze else ensemble
+    ensemble = _run_sde(term, args, y0, ts_fine, solver, noise_3d)
+    sliced = ensemble[:, ::n_substeps, :]
+    return sliced[0] if squeeze else sliced

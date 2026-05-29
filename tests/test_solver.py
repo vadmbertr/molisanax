@@ -99,53 +99,69 @@ class TestSolverStep:
 
 
 class TestSolveODE:
-    def _ts(self, n=100, dt=10.0):
-        return jnp.linspace(0.0, n * dt, n + 1)
-
     def test_uniform_field_euler(self):
         dlat, dlon = 1e-4, 2e-4
         y0 = jnp.array([10.0, 20.0])
-        ts = self._ts()
-        T = float(ts[-1] - ts[0])
-        traj = solve(uniform_ode_term(dlat, dlon), None, y0, ts, Euler())
-        assert traj.shape == (len(ts), 2)
+        n_save, int_dt = 100, 10.0
+        T = n_save * int_dt
+        traj = solve(uniform_ode_term(dlat, dlon), None, y0, jnp.array(0.0), n_save, int_dt, int_dt, Euler())
+        assert traj.shape == (n_save + 1, 2)
         assert float(traj[-1, 0]) == pytest.approx(float(y0[0]) + dlat * T, rel=1e-4)
         assert float(traj[-1, 1]) == pytest.approx(float(y0[1]) + dlon * T, rel=1e-4)
 
     def test_uniform_field_heun(self):
         dlat, dlon = 1e-4, 2e-4
         y0 = jnp.array([10.0, 20.0])
-        ts = self._ts()
-        T = float(ts[-1] - ts[0])
-        traj = solve(uniform_ode_term(dlat, dlon), None, y0, ts, Heun())
+        n_save, int_dt = 100, 10.0
+        T = n_save * int_dt
+        traj = solve(uniform_ode_term(dlat, dlon), None, y0, jnp.array(0.0), n_save, int_dt, int_dt, Heun())
         assert float(traj[-1, 0]) == pytest.approx(float(y0[0]) + dlat * T, rel=1e-5)
 
     def test_first_point_equals_y0(self):
         y0 = jnp.array([5.0, 10.0])
-        ts = jnp.linspace(0.0, 100.0, 11)
-        traj = solve(uniform_ode_term(0.0, 0.0), None, y0, ts)
+        traj = solve(uniform_ode_term(0.0, 0.0), None, y0, jnp.array(0.0), 10, 10.0, 10.0)
         assert jnp.allclose(traj[0], y0)
 
     def test_no_motion(self):
         y0 = jnp.array([0.0, 0.0])
-        ts = jnp.linspace(0.0, 100.0, 11)
-        traj = solve(uniform_ode_term(0.0, 0.0), None, y0, ts)
+        traj = solve(uniform_ode_term(0.0, 0.0), None, y0, jnp.array(0.0), 10, 10.0, 10.0)
         assert jnp.allclose(traj, jnp.zeros_like(traj))
 
     def test_jit_compatible(self):
         y0 = jnp.array([0.0, 0.0])
-        ts = jnp.linspace(0.0, 100.0, 11)
         term = uniform_ode_term(1e-4, 2e-4)
-        traj = jax.jit(lambda y: solve(term, None, y, ts))(y0)
+        traj = jax.jit(lambda y, t0: solve(term, None, y, t0, 10, 10.0, 10.0))(y0, jnp.array(0.0))
         assert traj.shape == (11, 2)
+
+    def test_t0_traced_no_recompile(self):
+        # t0 is traced: changing it must not trigger recompilation.
+        # Use a time-dependent term so the trajectory actually differs with t0.
+        def time_dep_term(t, y, args):
+            return jnp.array([1e-4 * t, 0.0])
+        fn = jax.jit(lambda t0: solve(time_dep_term, None, jnp.zeros(2), t0, 5, 10.0, 10.0))
+        traj_a = fn(jnp.array(0.0))
+        traj_b = fn(jnp.array(100.0))
+        assert traj_a.shape == traj_b.shape == (6, 2)
+        # Different t0 → different absolute times → different integrated velocity.
+        assert not jnp.allclose(traj_a, traj_b)
+
+    def test_substep_matches_fine_grid(self):
+        # With save_dt = 4 * int_dt, sliced output must equal a run at save_dt step.
+        dlat, dlon = 1e-4, 2e-4
+        y0 = jnp.array([0.0, 0.0])
+        term = uniform_ode_term(dlat, dlon)
+        int_dt, save_dt, n_save = 1.0, 4.0, 10
+
+        traj_sub  = solve(term, None, y0, jnp.array(0.0), n_save, int_dt, save_dt)
+        traj_coarse = solve(term, None, y0, jnp.array(0.0), n_save, save_dt, save_dt)
+        assert jnp.allclose(traj_sub, traj_coarse, atol=1e-6)
 
     def test_reverse_mode_grad(self):
         y0 = jnp.array([10.0, 20.0])
-        ts = jnp.linspace(0.0, 100.0, 11)
         term = uniform_ode_term(1e-4, 0.0)
 
         def loss(y0_):
-            return solve(term, None, y0_, ts)[-1, 0]
+            return solve(term, None, y0_, jnp.array(0.0), 10, 10.0, 10.0)[-1, 0]
 
         g = jax.grad(loss)(y0)
         assert float(g[0]) == pytest.approx(1.0, abs=1e-5)
@@ -153,25 +169,25 @@ class TestSolveODE:
 
     def test_forward_mode_jvp(self):
         y0 = jnp.array([10.0, 20.0])
-        ts = jnp.linspace(0.0, 100.0, 11)
         term = uniform_ode_term(1e-4, 2e-4)
-        _, tangent = jax.jvp(lambda y: solve(term, None, y, ts), (y0,), (jnp.ones(2),))
+        _, tangent = jax.jvp(
+            lambda y: solve(term, None, y, jnp.array(0.0), 10, 10.0, 10.0),
+            (y0,), (jnp.ones(2),),
+        )
         assert jnp.all(jnp.isfinite(tangent))
 
     def test_requires_no_key(self):
         y0 = jnp.zeros(2)
-        ts = jnp.linspace(0.0, 10.0, 5)
-        traj = solve(uniform_ode_term(0.0, 0.0), None, y0, ts)
+        traj = solve(uniform_ode_term(0.0, 0.0), None, y0, jnp.array(0.0), 4, 2.5, 2.5)
         assert traj.shape == (5, 2)
 
     def test_uniform_field_rk4(self):
         dlat, dlon = 1e-4, 2e-4
         y0 = jnp.array([10.0, 20.0])
-        ts = self._ts()
-        T = float(ts[-1] - ts[0])
-        traj = solve(uniform_ode_term(dlat, dlon), None, y0, ts, RK4())
-        assert traj.shape == (len(ts), 2)
-        # RK4 is exact for constant velocity (up to float32 accumulation).
+        n_save, int_dt = 100, 10.0
+        T = n_save * int_dt
+        traj = solve(uniform_ode_term(dlat, dlon), None, y0, jnp.array(0.0), n_save, int_dt, int_dt, RK4())
+        assert traj.shape == (n_save + 1, 2)
         assert float(traj[-1, 0]) == pytest.approx(float(y0[0]) + dlat * T, rel=1e-4)
         assert float(traj[-1, 1]) == pytest.approx(float(y0[1]) + dlon * T, rel=1e-4)
 
@@ -194,8 +210,10 @@ class TestSolveODE:
             exact = float(y0[0]) * float(jnp.exp(alpha * T))
 
             def err(solver, n):
-                ts = jnp.linspace(0.0, T, n + 1, dtype=jnp.float64)
-                return abs(float(solve(term, None, y0, ts, solver)[-1, 0]) - exact)
+                dt = T / n
+                return abs(float(
+                    solve(term, None, y0, jnp.array(0.0, dtype=jnp.float64), n, dt, dt, solver)[-1, 0]
+                ) - exact)
 
             err_rk4_coarse = err(RK4(), 4)
             err_rk4_fine   = err(RK4(), 8)
@@ -210,11 +228,10 @@ class TestSolveODE:
 
     def test_rk4_reverse_mode_grad(self):
         y0 = jnp.array([10.0, 20.0])
-        ts = jnp.linspace(0.0, 100.0, 11)
         term = uniform_ode_term(1e-4, 0.0)
 
         def loss(y0_):
-            return solve(term, None, y0_, ts, RK4())[-1, 0]
+            return solve(term, None, y0_, jnp.array(0.0), 10, 10.0, 10.0, RK4())[-1, 0]
 
         g = jax.grad(loss)(y0)
         assert float(g[0]) == pytest.approx(1.0, abs=1e-5)
@@ -227,10 +244,10 @@ class TestSolveODE:
         # produces y0 - v*T.
         dlat, dlon = 1e-4, 2e-4
         y0 = jnp.array([10.0, 20.0])
-        ts = jnp.linspace(100.0, 0.0, 101)  # strictly decreasing
-        T = float(ts[0] - ts[-1])
-        traj = solve(uniform_ode_term(dlat, dlon), None, y0, ts, Heun())
-        assert traj.shape == (len(ts), 2)
+        n_save, int_dt = 100, -1.0          # negative int_dt → backward
+        T = abs(n_save * int_dt)
+        traj = solve(uniform_ode_term(dlat, dlon), None, y0, jnp.array(100.0), n_save, int_dt, int_dt, Heun())
+        assert traj.shape == (n_save + 1, 2)
         assert float(traj[-1, 0]) == pytest.approx(float(y0[0]) - dlat * T, rel=1e-5)
         assert float(traj[-1, 1]) == pytest.approx(float(y0[1]) - dlon * T, rel=1e-5)
 
@@ -239,85 +256,74 @@ class TestSolveODE:
         # land back at y0 to within solver accuracy.
         dlat, dlon = 1e-4, 2e-4
         y0 = jnp.array([10.0, 20.0])
-        ts_fwd = jnp.linspace(0.0, 100.0, 51)
-        ts_bwd = jnp.linspace(100.0, 0.0, 51)
         term = uniform_ode_term(dlat, dlon)
-        fwd = solve(term, None, y0, ts_fwd, RK4())
-        bwd = solve(term, None, fwd[-1], ts_bwd, RK4())
+        fwd = solve(term, None, y0, jnp.array(0.0), 50, 2.0, 2.0, RK4())
+        bwd = solve(term, None, fwd[-1], jnp.array(100.0), 50, -2.0, -2.0, RK4())
         assert jnp.allclose(bwd[-1], y0, atol=1e-8)
 
     def test_backwards_jit_and_grad(self):
         y0 = jnp.array([10.0, 20.0])
-        ts = jnp.linspace(50.0, 0.0, 11)
         term = uniform_ode_term(1e-4, 0.0)
-        traj = jax.jit(lambda y: solve(term, None, y, ts))(y0)
+        traj = jax.jit(lambda y, t0: solve(term, None, y, t0, 10, -5.0, -5.0))(y0, jnp.array(50.0))
         assert traj.shape == (11, 2)
 
         def loss(y0_):
-            return solve(term, None, y0_, ts)[-1, 0]
+            return solve(term, None, y0_, jnp.array(50.0), 10, -5.0, -5.0)[-1, 0]
 
         g = jax.grad(loss)(y0)
         assert float(g[0]) == pytest.approx(1.0, abs=1e-5)
 
 
 class TestSolveSDE:
-    def _ts(self, n=10, dt=10.0):
-        return jnp.linspace(0.0, n * dt, n + 1)
-
     def test_single_sample_shape(self):
         y0 = jnp.zeros(2)
-        ts = self._ts()
         key = jax.random.key(0)
-        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, key=key, n_noise=2)
-        assert traj.shape == (len(ts), 2)
+        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, jnp.array(0.0), 10, 10.0, 10.0, key=key, n_noise=2)
+        assert traj.shape == (11, 2)
 
     def test_ensemble_shape(self):
         y0 = jnp.zeros(2)
-        ts = self._ts()
         key = jax.random.key(0)
-        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, key=key, n_noise=2, n_samples=7)
-        assert traj.shape == (7, len(ts), 2)
+        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, jnp.array(0.0), 10, 10.0, 10.0, key=key, n_noise=2, n_samples=7)
+        assert traj.shape == (7, 11, 2)
 
     def test_zero_noise_matches_ode(self):
         y0 = jnp.array([10.0, 20.0])
-        ts = self._ts(n=50)
         key = jax.random.key(0)
         # noise_scale=0.0 → g=0 → matches ODE
-        sde_traj = solve(uniform_sde_term(1e-4, 2e-4, noise_scale=0.0), None, y0, ts,
-                         key=key, n_noise=2)
-        ode_traj = solve(uniform_ode_term(1e-4, 2e-4), None, y0, ts)
+        sde_traj = solve(uniform_sde_term(1e-4, 2e-4, noise_scale=0.0), None, y0,
+                         jnp.array(0.0), 50, 10.0, 10.0, key=key, n_noise=2)
+        ode_traj = solve(uniform_ode_term(1e-4, 2e-4), None, y0,
+                         jnp.array(0.0), 50, 10.0, 10.0)
         assert jnp.allclose(sde_traj, ode_traj, atol=1e-5)
 
     def test_ensemble_mean_close_to_ode_with_small_noise(self):
         y0 = jnp.zeros(2)
-        ts = self._ts(n=10)
         key = jax.random.key(0)
-        ensemble = solve(uniform_sde_term(1e-4, 2e-4, noise_scale=1e-8), None, y0, ts,
-                         key=key, n_noise=2, n_samples=200)
-        ode_traj = solve(uniform_ode_term(1e-4, 2e-4), None, y0, ts)
+        ensemble = solve(uniform_sde_term(1e-4, 2e-4, noise_scale=1e-8), None, y0,
+                         jnp.array(0.0), 10, 10.0, 10.0, key=key, n_noise=2, n_samples=200)
+        ode_traj = solve(uniform_ode_term(1e-4, 2e-4), None, y0,
+                         jnp.array(0.0), 10, 10.0, 10.0)
         assert jnp.allclose(ensemble.mean(axis=0), ode_traj, atol=1e-4)
 
     def test_missing_key_and_noise_raises(self):
         # n_noise without key or noise → SDE mode but no noise source
         y0 = jnp.zeros(2)
-        ts = self._ts()
         with pytest.raises(ValueError):
-            solve(uniform_sde_term(0.0, 0.0), None, y0, ts, n_noise=2)
+            solve(uniform_sde_term(0.0, 0.0), None, y0, jnp.array(0.0), 10, 10.0, 10.0, n_noise=2)
 
     def test_missing_n_noise_with_key_raises(self):
         # key without n_noise → cannot auto-sample without knowing latent dim
         y0 = jnp.zeros(2)
-        ts = self._ts()
         with pytest.raises(ValueError, match="n_noise"):
-            solve(uniform_sde_term(0.0, 0.0), None, y0, ts, key=jax.random.key(0))
+            solve(uniform_sde_term(0.0, 0.0), None, y0, jnp.array(0.0), 10, 10.0, 10.0, key=jax.random.key(0))
 
     def test_jit_compatible(self):
         y0 = jnp.zeros(2)
-        ts = self._ts()
         term = uniform_sde_term(1e-4, 2e-4)
-        fn = jax.jit(lambda k: solve(term, None, y0, ts, key=k, n_noise=2, n_samples=3))
+        fn = jax.jit(lambda k: solve(term, None, y0, jnp.array(0.0), 10, 10.0, 10.0, key=k, n_noise=2, n_samples=3))
         traj = fn(jax.random.key(0))
-        assert traj.shape == (3, len(ts), 2)
+        assert traj.shape == (3, 11, 2)
 
     def test_matrix_diffusion(self):
         # g.shape == (2, 4): full matrix diffusion with n_noise=4.
@@ -327,9 +333,8 @@ class TestSolveSDE:
                                   [0.0, 0.0, 1.0, 1.0]])
             return drift, g
         y0 = jnp.zeros(2)
-        ts = self._ts()
-        traj = solve(term_mat, None, y0, ts, key=jax.random.key(0), n_noise=4)
-        assert traj.shape == (len(ts), 2)
+        traj = solve(term_mat, None, y0, jnp.array(0.0), 10, 10.0, 10.0, key=jax.random.key(0), n_noise=4)
+        assert traj.shape == (11, 2)
         assert jnp.all(jnp.isfinite(traj))
 
     def test_nonlinear_noise_via_z_in_drift(self):
@@ -346,10 +351,9 @@ class TestSolveSDE:
             drift = jnp.array([1e-4, 2e-4]) + residual
             return drift, jnp.zeros((2, 4))       # opt out of g*dW path
         y0 = jnp.zeros(2)
-        ts = self._ts()
-        traj = solve(mdn_like_term, None, y0, ts,
+        traj = solve(mdn_like_term, None, y0, jnp.array(0.0), 10, 10.0, 10.0,
                      key=jax.random.key(0), n_noise=4, n_samples=5)
-        assert traj.shape == (5, len(ts), 2)
+        assert traj.shape == (5, 11, 2)
         assert jnp.all(jnp.isfinite(traj))
         # Different samples (different z trajectories) must produce distinct
         # outputs — otherwise z isn't actually reaching the term.
@@ -359,49 +363,46 @@ class TestSolveSDE:
 
     def test_presampled_noise_single_shape(self):
         y0 = jnp.zeros(2)
-        ts = self._ts()
-        n_steps = len(ts) - 1
-        noise = jnp.zeros((n_steps, 2))
-        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, noise=noise)
-        assert traj.shape == (len(ts), 2)
+        n_save, n_noise = 10, 2
+        noise = jnp.zeros((n_save, n_noise))
+        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, jnp.array(0.0), n_save, 10.0, 10.0, noise=noise)
+        assert traj.shape == (n_save + 1, 2)
 
     def test_presampled_noise_single_zero_matches_ode(self):
         y0 = jnp.array([10.0, 20.0])
-        ts = self._ts(n=50)
-        n_steps = len(ts) - 1
-        noise = jnp.zeros((n_steps, 2))
-        sde_traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, noise=noise)
-        ode_traj = solve(uniform_ode_term(1e-4, 2e-4), None, y0, ts)
+        n_save = 50
+        noise = jnp.zeros((n_save, 2))
+        sde_traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, jnp.array(0.0), n_save, 10.0, 10.0, noise=noise)
+        ode_traj = solve(uniform_ode_term(1e-4, 2e-4), None, y0, jnp.array(0.0), n_save, 10.0, 10.0)
         assert jnp.allclose(sde_traj, ode_traj, atol=1e-5)
 
     def test_presampled_noise_ensemble_shape(self):
         y0 = jnp.zeros(2)
-        ts = self._ts()
-        n_steps = len(ts) - 1
-        noise = jnp.zeros((5, n_steps, 2))
-        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, noise=noise)
-        assert traj.shape == (5, len(ts), 2)
+        n_save = 10
+        noise = jnp.zeros((5, n_save, 2))
+        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, jnp.array(0.0), n_save, 10.0, 10.0, noise=noise)
+        assert traj.shape == (5, n_save + 1, 2)
 
     def test_presampled_noise_no_key_needed(self):
         y0 = jnp.zeros(2)
-        ts = self._ts()
-        n_steps = len(ts) - 1
-        noise = jax.random.normal(jax.random.key(7), (n_steps, 2))
-        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, noise=noise)
+        n_save = 10
+        noise = jax.random.normal(jax.random.key(7), (n_save, 2))
+        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, jnp.array(0.0), n_save, 10.0, 10.0, noise=noise)
         assert jnp.all(jnp.isfinite(traj))
 
     def test_presampled_vs_autosampled_same_noise_same_traj(self):
         # Reproduce the exact noise that auto-sample uses, then compare.
         y0 = jnp.array([10.0, 20.0])
-        ts = self._ts(n=20)
+        n_save = 20
         key = jax.random.key(42)
-        n_steps = len(ts) - 1
 
-        traj_auto = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, key=key, n_noise=2)
+        traj_auto = solve(uniform_sde_term(1e-4, 2e-4), None, y0,
+                          jnp.array(0.0), n_save, 10.0, 10.0, key=key, n_noise=2)
 
-        # Auto-sample draws (1, n_steps, n_noise)[0]
-        noise_repro = jax.random.normal(key, shape=(1, n_steps, 2), dtype=y0.dtype)[0]
-        traj_noise = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, noise=noise_repro)
+        # Auto-sample draws (1, n_fine, n_noise)[0]; with n_substeps=1, n_fine=n_save.
+        noise_repro = jax.random.normal(key, shape=(1, n_save, 2), dtype=y0.dtype)[0]
+        traj_noise = solve(uniform_sde_term(1e-4, 2e-4), None, y0,
+                           jnp.array(0.0), n_save, 10.0, 10.0, noise=noise_repro)
 
         assert jnp.allclose(traj_auto, traj_noise, atol=1e-6)
 
@@ -420,10 +421,10 @@ class TestTsit5:
     def test_uniform_field_solve(self):
         dlat, dlon = 1e-4, 2e-4
         y0 = jnp.array([10.0, 20.0])
-        ts = jnp.linspace(0.0, 1000.0, 101)
-        T = float(ts[-1] - ts[0])
-        traj = solve(uniform_ode_term(dlat, dlon), None, y0, ts, Tsit5())
-        assert traj.shape == (len(ts), 2)
+        n_save, int_dt = 100, 10.0
+        T = n_save * int_dt
+        traj = solve(uniform_ode_term(dlat, dlon), None, y0, jnp.array(0.0), n_save, int_dt, int_dt, Tsit5())
+        assert traj.shape == (n_save + 1, 2)
         assert float(traj[-1, 0]) == pytest.approx(float(y0[0]) + dlat * T, rel=1e-4)
 
     def test_sde_step_raises(self):
@@ -435,11 +436,10 @@ class TestTsit5:
 
     def test_jit_and_grad(self):
         y0 = jnp.array([10.0, 20.0])
-        ts = jnp.linspace(0.0, 100.0, 11)
         term = uniform_ode_term(1e-4, 0.0)
 
         def loss(y0_):
-            return solve(term, None, y0_, ts, Tsit5())[-1, 0]
+            return solve(term, None, y0_, jnp.array(0.0), 10, 10.0, 10.0, Tsit5())[-1, 0]
 
         g = jax.grad(jax.jit(loss))(y0)
         assert float(g[0]) == pytest.approx(1.0, abs=1e-5)
@@ -455,10 +455,10 @@ class TestDopri5:
     def test_uniform_field_solve(self):
         dlat, dlon = 1e-4, 2e-4
         y0 = jnp.array([10.0, 20.0])
-        ts = jnp.linspace(0.0, 1000.0, 101)
-        T = float(ts[-1] - ts[0])
-        traj = solve(uniform_ode_term(dlat, dlon), None, y0, ts, Dopri5())
-        assert traj.shape == (len(ts), 2)
+        n_save, int_dt = 100, 10.0
+        T = n_save * int_dt
+        traj = solve(uniform_ode_term(dlat, dlon), None, y0, jnp.array(0.0), n_save, int_dt, int_dt, Dopri5())
+        assert traj.shape == (n_save + 1, 2)
         assert float(traj[-1, 0]) == pytest.approx(float(y0[0]) + dlat * T, rel=1e-4)
 
     def test_sde_step_raises(self):
@@ -470,11 +470,10 @@ class TestDopri5:
 
     def test_jit_and_grad(self):
         y0 = jnp.array([10.0, 20.0])
-        ts = jnp.linspace(0.0, 100.0, 11)
         term = uniform_ode_term(1e-4, 0.0)
 
         def loss(y0_):
-            return solve(term, None, y0_, ts, Dopri5())[-1, 0]
+            return solve(term, None, y0_, jnp.array(0.0), 10, 10.0, 10.0, Dopri5())[-1, 0]
 
         g = jax.grad(jax.jit(loss))(y0)
         assert float(g[0]) == pytest.approx(1.0, abs=1e-5)
@@ -497,8 +496,10 @@ def test_tsit5_and_dopri5_fifth_order_convergence():
         exact = float(y0[0]) * float(jnp.exp(alpha * T))
 
         def err(solver, n):
-            ts = jnp.linspace(0.0, T, n + 1, dtype=jnp.float64)
-            return abs(float(solve(term, None, y0, ts, solver)[-1, 0]) - exact)
+            dt = T / n
+            return abs(float(
+                solve(term, None, y0, jnp.array(0.0, dtype=jnp.float64), n, dt, dt, solver)[-1, 0]
+            ) - exact)
 
         for solver_cls in (Tsit5, Dopri5):
             err_coarse = err(solver_cls(), 4)
@@ -556,10 +557,9 @@ class TestEulerHeun:
 
     def test_full_solve(self):
         y0 = jnp.zeros(2)
-        ts = jnp.linspace(0.0, 100.0, 11)
-        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, ts, EulerHeun(),
-                     key=jax.random.key(0), n_noise=2)
-        assert traj.shape == (len(ts), 2)
+        traj = solve(uniform_sde_term(1e-4, 2e-4), None, y0, jnp.array(0.0), 10, 10.0, 10.0,
+                     EulerHeun(), key=jax.random.key(0), n_noise=2)
+        assert traj.shape == (11, 2)
         assert jnp.all(jnp.isfinite(traj))
 
 
@@ -621,10 +621,9 @@ class TestItoMilstein:
     def test_full_solve(self):
         sigma = 0.1
         y0 = jnp.array([1.0, 1.0])
-        ts = jnp.linspace(0.0, 1.0, 11)
-        traj = solve(_linear_diffusion_term(sigma), None, y0, ts, ItoMilstein(),
-                     key=jax.random.key(0), n_noise=2)
-        assert traj.shape == (len(ts), 2)
+        traj = solve(_linear_diffusion_term(sigma), None, y0, jnp.array(0.0), 10, 0.1, 0.1,
+                     ItoMilstein(), key=jax.random.key(0), n_noise=2)
+        assert traj.shape == (11, 2)
         assert jnp.all(jnp.isfinite(traj))
 
 
@@ -659,8 +658,7 @@ class TestStratonovichMilstein:
     def test_full_solve(self):
         sigma = 0.1
         y0 = jnp.array([1.0, 1.0])
-        ts = jnp.linspace(0.0, 1.0, 11)
-        traj = solve(_linear_diffusion_term(sigma), None, y0, ts, StratonovichMilstein(),
-                     key=jax.random.key(0), n_noise=2)
-        assert traj.shape == (len(ts), 2)
+        traj = solve(_linear_diffusion_term(sigma), None, y0, jnp.array(0.0), 10, 0.1, 0.1,
+                     StratonovichMilstein(), key=jax.random.key(0), n_noise=2)
+        assert traj.shape == (11, 2)
         assert jnp.all(jnp.isfinite(traj))
