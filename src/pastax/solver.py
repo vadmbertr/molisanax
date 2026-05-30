@@ -59,7 +59,6 @@ solver sign-abs-normalises the ``sqrt(dt)`` factor.
 from __future__ import annotations
 
 import abc
-import math
 from typing import Callable
 
 import equinox as eqx
@@ -589,15 +588,16 @@ def _scan(body, init, xs, adjoint, checkpoints):
     """Run the integration loop with the chosen differentiation strategy.
 
     ``"checkpointed"`` uses Equinox's binomial-checkpointing scan (treeverse): low
-    reverse-mode memory but not forward-mode autodifferentiable. ``"direct"`` uses a
-    plain ``lax.scan`` (with per-step ``jax.checkpoint``, transparent to ``jvp``) and
-    supports both forward and reverse mode.
+    reverse-mode memory, but ``jax.jvp`` is not supported. ``"forward"`` uses a plain
+    ``jax.lax.scan`` (no per-step checkpoint) — tangents propagate with O(1) extra
+    state per step under ``jax.jvp`` / ``jax.jacfwd``, mirroring
+    ``diffrax.ForwardMode``.
     """
     if adjoint == "checkpointed":
         return eqxi.scan(body, init, xs, kind="checkpointed", checkpoints=checkpoints)
-    if adjoint == "direct":
-        return jax.lax.scan(jax.checkpoint(body), init, xs)
-    raise ValueError(f'adjoint must be "checkpointed" or "direct", got {adjoint!r}.')
+    if adjoint == "forward":
+        return jax.lax.scan(body, init, xs)
+    raise ValueError(f'adjoint must be "checkpointed" or "forward", got {adjoint!r}.')
 
 
 def _run_ode(
@@ -749,13 +749,17 @@ def solve(
         adjoint: Differentiation strategy for the integration loop.
             ``"checkpointed"`` (default) uses binomial checkpointing (treeverse) for
             low reverse-mode memory, but is **reverse-mode only** — ``jax.jvp`` is not
-            supported. ``"direct"`` uses a plain scan that supports **both** ``jax.grad``
-            and ``jax.jvp`` at O(n_fine) memory.
+            supported. ``"forward"`` uses a plain ``jax.lax.scan`` (no per-step
+            checkpoint) ideal for forward-mode AD (``jax.jvp`` / ``jax.jacfwd``);
+            mirrors ``diffrax.ForwardMode``. Reverse mode also works through this path
+            at full O(n_fine) activation memory.
         checkpoints: Memory knob for ``adjoint="checkpointed"`` (ignored otherwise).
-            ``None`` (default) uses ``ceil(log2(n_fine))`` checkpoints → O(log n_fine)
-            memory and O(n_fine·log n_fine) recompute. A larger int trades memory for less
-            recompute (e.g. ``~sqrt(n_fine)`` → O(sqrt n_fine) memory, O(n_fine) time);
-            ``"all"`` checkpoints every step (O(n_fine) memory, no recompute).
+            ``None`` (default) forwards to ``equinox.internal.scan``'s built-in
+            ``O(sqrt(n_fine))`` Stumm–Walther online schedule — the same default that
+            ``diffrax.RecursiveCheckpointAdjoint`` uses, balancing memory against
+            backward recompute. A smaller int (e.g. ``ceil(log2(n_fine))``) saves
+            memory at the cost of more recompute; a larger int (or ``"all"`` for one
+            per step) trades memory for less recompute.
 
     Returns:
         Shape ``(n_save + 1, 2)`` in ODE mode or SDE with ``n_samples == 1``.
@@ -764,8 +768,8 @@ def solve(
     if solver is None:
         solver = Heun()
 
-    if adjoint not in ("checkpointed", "direct"):
-        raise ValueError(f'adjoint must be "checkpointed" or "direct", got {adjoint!r}.')
+    if adjoint not in ("checkpointed", "forward"):
+        raise ValueError(f'adjoint must be "checkpointed" or "forward", got {adjoint!r}.')
 
     n_substeps = round(save_dt / int_dt)
     if n_substeps < 1:
@@ -779,9 +783,6 @@ def solve(
         )
     n_fine = n_save * n_substeps
     ts_fine = t0 + jnp.arange(n_fine + 1) * int_dt
-
-    if adjoint == "checkpointed" and checkpoints is None:
-        checkpoints = max(1, math.ceil(math.log2(max(n_fine, 2))))
 
     if key is not None:
         if n_samples == 1:

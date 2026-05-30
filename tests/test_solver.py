@@ -163,12 +163,12 @@ class TestSolveODE:
         y0 = jnp.array([10.0, 20.0])
         term = uniform_ode_term(1e-4, 2e-4)
         _, tangent = jax.jvp(
-            lambda y: solve(term, y, jnp.array(0.0), 10, 10.0, 10.0, adjoint="direct"),
+            lambda y: solve(term, y, jnp.array(0.0), 10, 10.0, 10.0, adjoint="forward"),
             (y0,), (jnp.ones(2),),
         )
         assert jnp.all(jnp.isfinite(tangent))
 
-    def test_forward_mode_requires_direct_adjoint(self):
+    def test_forward_mode_requires_forward_adjoint(self):
         y0 = jnp.array([10.0, 20.0])
         term = uniform_ode_term(1e-4, 2e-4)
         with pytest.raises(Exception):
@@ -177,7 +177,7 @@ class TestSolveODE:
                 (y0,), (jnp.ones(2),),
             )
 
-    def test_checkpointed_matches_direct_grad(self):
+    def test_checkpointed_matches_forward_grad(self):
         y0 = jnp.array([10.0, 20.0])
         term = uniform_ode_term(1e-4, 2e-4)
 
@@ -187,11 +187,11 @@ class TestSolveODE:
                 adjoint=adjoint, checkpoints=checkpoints,
             )[-1].sum()
 
-        g_direct = jax.grad(lambda y: loss(y, "direct"))(y0)
+        g_forward = jax.grad(lambda y: loss(y, "forward"))(y0)
         g_ckpt = jax.grad(lambda y: loss(y, "checkpointed"))(y0)
         g_ckpt_explicit = jax.grad(lambda y: loss(y, "checkpointed", checkpoints=2))(y0)
-        assert jnp.allclose(g_ckpt, g_direct, atol=1e-6)
-        assert jnp.allclose(g_ckpt_explicit, g_direct, atol=1e-6)
+        assert jnp.allclose(g_ckpt, g_forward, atol=1e-6)
+        assert jnp.allclose(g_ckpt_explicit, g_forward, atol=1e-6)
 
     def test_requires_no_key(self):
         y0 = jnp.zeros(2)
