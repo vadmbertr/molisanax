@@ -188,7 +188,10 @@ class TestPartialSlipErrors:
         t = np.array([0.0, 1.0], dtype=np.float32)
         u_data = np.zeros((nt, nlat, nlon - 1), dtype=np.float32)
         v_data = np.zeros((nt, nlat - 1, nlon), dtype=np.float32)
-        ds = Dataset.from_arrays_cgrid(t, lat, lon, u_data, v_data)
+        ds = Dataset.from_arrays_cgrid(
+            t, lat, lon,
+            {"current": {"u": ("u", u_data), "v": ("v", v_data)}},
+        )
         with pytest.raises(NotImplementedError, match="C-grid"):
             ds.velocity_interp(
                 jnp.asarray(0.0), jnp.asarray(2.0), jnp.asarray(2.5),

@@ -22,6 +22,11 @@ import xarray as xr
 from pastax import Dataset, Field
 
 
+def _uv_vectors(u, v, group="current", u_name="u", v_name="v"):
+    """Wrap a single (u, v) pair into the new C-grid `vectors` dict shape."""
+    return {group: {"u": (u_name, u), "v": (v_name, v)}}
+
+
 def test_field_mask_defaults_to_none():
     f = Field(
         values=jnp.zeros((2, 3, 4)),
@@ -172,7 +177,7 @@ class TestFromArraysCGridMask:
     def test_nan_in_u_infers_u_face_mask(self):
         t, lat, lon, u, v = self._inputs()
         u[:, 0, 0] = np.nan
-        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v)
+        ds = Dataset.from_arrays_cgrid(t, lat, lon, _uv_vectors(u, v))
         assert ds["u"].mask is not None
         assert ds["u"].mask.shape == (5, 5)  # (nlat, nlon - 1)
         assert bool(ds["u"].mask[0, 0]) is True
@@ -181,7 +186,7 @@ class TestFromArraysCGridMask:
     def test_nan_in_v_infers_v_face_mask(self):
         t, lat, lon, u, v = self._inputs()
         v[:, 0, 0] = np.nan
-        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v)
+        ds = Dataset.from_arrays_cgrid(t, lat, lon, _uv_vectors(u, v))
         assert ds["u"].mask is None
         assert ds["v"].mask is not None
         assert ds["v"].mask.shape == (4, 6)  # (nlat - 1, nlon)
@@ -191,7 +196,7 @@ class TestFromArraysCGridMask:
         sst = np.full((2, 5, 6), 15.0, dtype=np.float32)
         sst[:, 0, 0] = np.nan
         ds = Dataset.from_arrays_cgrid(
-            t, lat, lon, u, v, tracers={"sst": sst},
+            t, lat, lon, _uv_vectors(u, v), tracers={"sst": sst},
         )
         assert ds["sst"].mask is not None
         assert ds["sst"].mask.shape == (5, 6)
@@ -201,7 +206,9 @@ class TestFromArraysCGridMask:
         t, lat, lon, u, v = self._inputs()
         u_mask = np.zeros((5, 5), dtype=bool)
         u_mask[2, 3] = True
-        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v, masks={"u": u_mask})
+        ds = Dataset.from_arrays_cgrid(
+            t, lat, lon, _uv_vectors(u, v), masks={"u": u_mask},
+        )
         assert bool(ds["u"].mask[2, 3]) is True
 
     def test_explicit_u_mask_wrong_shape_rejected(self):
@@ -209,13 +216,17 @@ class TestFromArraysCGridMask:
         # Centre shape instead of u-face shape
         wrong = np.zeros((5, 6), dtype=bool)
         with pytest.raises(ValueError, match=r"masks\['u'\]"):
-            Dataset.from_arrays_cgrid(t, lat, lon, u, v, masks={"u": wrong})
+            Dataset.from_arrays_cgrid(
+                t, lat, lon, _uv_vectors(u, v), masks={"u": wrong},
+            )
 
     def test_explicit_v_mask_wrong_shape_rejected(self):
         t, lat, lon, u, v = self._inputs()
         wrong = np.zeros((5, 6), dtype=bool)
         with pytest.raises(ValueError, match=r"masks\['v'\]"):
-            Dataset.from_arrays_cgrid(t, lat, lon, u, v, masks={"v": wrong})
+            Dataset.from_arrays_cgrid(
+                t, lat, lon, _uv_vectors(u, v), masks={"v": wrong},
+            )
 
     def test_explicit_tracer_mask_routed_correctly(self):
         t, lat, lon, u, v = self._inputs()
@@ -223,13 +234,37 @@ class TestFromArraysCGridMask:
         tr_mask = np.zeros((5, 6), dtype=bool)
         tr_mask[1, 1] = True
         ds = Dataset.from_arrays_cgrid(
-            t, lat, lon, u, v,
+            t, lat, lon, _uv_vectors(u, v),
             tracers={"sst": sst}, masks={"sst": tr_mask},
         )
         assert bool(ds["sst"].mask[1, 1]) is True
         # u/v still mask-less (no NaN, no user mask)
         assert ds["u"].mask is None
         assert ds["v"].mask is None
+
+    def test_masks_routed_to_renamed_vector_fields(self):
+        """Masks keyed by user-supplied field names should reach the
+        right Field even when those names are not 'u' / 'v'."""
+        t, lat, lon, u, v = self._inputs()
+        uo_mask = np.zeros((5, 5), dtype=bool)
+        uo_mask[1, 2] = True
+        u10_mask = np.zeros((5, 5), dtype=bool)
+        u10_mask[3, 4] = True
+        u_wind = u.copy()
+        v_wind = v.copy()
+        ds = Dataset.from_arrays_cgrid(
+            t, lat, lon,
+            {
+                "current": {"u": ("uo",  u),      "v": ("vo",  v)},
+                "wind":    {"u": ("u10", u_wind), "v": ("v10", v_wind)},
+            },
+            masks={"uo": uo_mask, "u10": u10_mask},
+        )
+        assert bool(ds["uo"].mask[1, 2]) is True
+        assert bool(ds["u10"].mask[3, 4]) is True
+        # Untouched V fields stay mask-less.
+        assert ds["vo"].mask is None
+        assert ds["v10"].mask is None
 
 
 class TestFromXarrayCGridMask:
@@ -253,7 +288,7 @@ class TestFromXarrayCGridMask:
         )
         ds = Dataset.from_xarray_cgrid(
             ds_xr,
-            u_name="uo", v_name="vo",
+            vectors={"current": {"u": ("u", "uo"), "v": ("v", "vo")}},
             coordinates={"time": "time", "lat": "lat", "lon": "lon"},
         )
         assert ds["u"].mask is not None

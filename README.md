@@ -136,23 +136,45 @@ dataset = Dataset.from_arrays({"u": u_data}, t=t, lat=lat, lon=lon)
 
 ### Loading C-grid forcing (NEMO convention)
 
-For data on an Arakawa C-grid, U lives on the east faces of the centre cells
-(shape `(time, nlat, nlon - 1)`) and V on the north faces (shape
-`(time, nlat - 1, nlon)`). `from_arrays_cgrid` auto-derives the staggered
-coordinates as half-cell shifts of the centre grid:
+For data on an Arakawa C-grid, every vector field has its U component on the
+east faces of the centre cells (shape `(time, nlat, nlon - 1)`) and its V
+component on the north faces (shape `(time, nlat - 1, nlon)`). Vector fields
+are declared via the `vectors` mapping; the outer key is a free-form label
+for each pair (used in error messages) and the inner tuples give the field
+names under which the components are registered in `Dataset.fields` plus
+their values. `from_arrays_cgrid` auto-derives the staggered coordinates as
+half-cell shifts of the centre grid and shares them across every registered
+vector:
 
 ```python
 from pastax import Dataset
 
 dataset = Dataset.from_arrays_cgrid(
     t, center_lat, center_lon,
-    u_values,                       # (T, nlat, nlon - 1)  on east faces
-    v_values,                       # (T, nlat - 1, nlon)  on north faces
+    vectors={
+        "current": {"u": ("u", u_values), "v": ("v", v_values)},
+    },
     tracers={"sst": sst_values},    # optional, at cell centres (T, nlat, nlon)
 )
 # dataset["u"].stagger == "u_face"
 # dataset["v"].stagger == "v_face"
 # dataset.grid.stagger_type == "C"
+```
+
+Several vector fields can live on the same C-grid — surface current and
+10-m wind, or a decomposition into geostrophic / Ekman / Stokes
+components — by adding more entries to `vectors`:
+
+```python
+dataset = Dataset.from_arrays_cgrid(
+    t, center_lat, center_lon,
+    vectors={
+        "current": {"u": ("uo",  u_curr), "v": ("vo",  v_curr)},
+        "wind":    {"u": ("u10", u_wind), "v": ("v10", v_wind)},
+    },
+)
+# dataset.fields.keys() == {"uo", "vo", "u10", "v10"}
+# Pick the pair to integrate via velocity_interp(u_name=..., v_name=...).
 ```
 
 The same `term` you wrote for A-grid forcing works unchanged — each `Field`
@@ -164,7 +186,10 @@ xarray analogue:
 ```python
 dataset = Dataset.from_xarray_cgrid(
     ds,
-    u_name="uo", v_name="vo",
+    vectors={
+        "current": {"u": ("u", "uo"), "v": ("v", "vo")},
+        # each tuple is (internal_field_name, xarray_variable_name)
+    },
     coordinates={"time": "time", "lat": "lat", "lon": "lon"},  # centre coords
     tracers={"sst": "thetao"},
 )
