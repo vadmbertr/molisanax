@@ -295,6 +295,11 @@ class TestDatasetFromArrays:
         assert jnp.allclose(ds_dataset["u"].values, arr_dataset["u"].values)
 
 
+def _uv_vectors(u, v, group="current", u_name="u", v_name="v"):
+    """Wrap a single (u, v) pair into the new `vectors` dict shape."""
+    return {group: {"u": (u_name, u), "v": (v_name, v)}}
+
+
 class TestDatasetCGrid:
     """NEMO-convention Arakawa C-grid loaders and round-trip behaviour."""
 
@@ -308,7 +313,7 @@ class TestDatasetCGrid:
 
     def test_builds_u_v_with_correct_stagger(self):
         t, lat, lon, u, v = self._cgrid_inputs()
-        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v)
+        ds = Dataset.from_arrays_cgrid(t, lat, lon, _uv_vectors(u, v))
         assert ds["u"].stagger == "u_face"
         assert ds["v"].stagger == "v_face"
         assert ds["u"].values.shape == u.shape
@@ -316,14 +321,14 @@ class TestDatasetCGrid:
 
     def test_grid_metadata_is_c_grid(self):
         t, lat, lon, u, v = self._cgrid_inputs()
-        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v)
+        ds = Dataset.from_arrays_cgrid(t, lat, lon, _uv_vectors(u, v))
         assert isinstance(ds.grid, Grid)
         assert ds.grid.stagger_type == "C"
         assert ds.grid.grid_type == "rectilinear"
 
     def test_auto_derived_coords_match_grid_helpers(self):
         t, lat, lon, u, v = self._cgrid_inputs()
-        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v)
+        ds = Dataset.from_arrays_cgrid(t, lat, lon, _uv_vectors(u, v))
         u_lat_expected, u_lon_expected = ds.grid.u_face_coords()
         v_lat_expected, v_lon_expected = ds.grid.v_face_coords()
         assert jnp.allclose(ds["u"].lat_coords, u_lat_expected)
@@ -333,26 +338,30 @@ class TestDatasetCGrid:
 
     def test_u_lon_shifted_half_cell_east(self):
         t, lat, lon, u, v = self._cgrid_inputs()
-        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v)
+        ds = Dataset.from_arrays_cgrid(t, lat, lon, _uv_vectors(u, v))
         dlon = float(lon[1] - lon[0])
         assert jnp.allclose(ds["u"].lon_coords, jnp.asarray(lon[:-1] + 0.5 * dlon))
 
     def test_v_lat_shifted_half_cell_north(self):
         t, lat, lon, u, v = self._cgrid_inputs()
-        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v)
+        ds = Dataset.from_arrays_cgrid(t, lat, lon, _uv_vectors(u, v))
         dlat = float(lat[1] - lat[0])
         assert jnp.allclose(ds["v"].lat_coords, jnp.asarray(lat[:-1] + 0.5 * dlat))
 
     def test_explicit_staggered_coords_override_autoderive(self):
         t, lat, lon, u, v = self._cgrid_inputs()
         custom_u_lon = jnp.asarray(lon[:-1] + 0.7)  # arbitrary, not half-cell
-        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v, u_lon=custom_u_lon)
+        ds = Dataset.from_arrays_cgrid(
+            t, lat, lon, _uv_vectors(u, v), u_lon=custom_u_lon,
+        )
         assert jnp.allclose(ds["u"].lon_coords, custom_u_lon)
 
     def test_tracers_attached_at_centre(self):
         t, lat, lon, u, v = self._cgrid_inputs()
         sst = np.full((3, 6, 8), 15.0, dtype=np.float32)
-        ds = Dataset.from_arrays_cgrid(t, lat, lon, u, v, tracers={"sst": sst})
+        ds = Dataset.from_arrays_cgrid(
+            t, lat, lon, _uv_vectors(u, v), tracers={"sst": sst},
+        )
         assert ds["sst"].stagger == "center"
         assert ds["sst"].values.shape == (3, 6, 8)
         assert jnp.allclose(ds["sst"].lat_coords, jnp.asarray(lat))
@@ -361,20 +370,103 @@ class TestDatasetCGrid:
     def test_rejects_wrong_u_shape(self):
         t, lat, lon, u, v = self._cgrid_inputs()
         u_wrong = np.ones((3, 6, 8), dtype=np.float32)  # nlon instead of nlon-1
-        with pytest.raises(ValueError, match="u_values"):
-            Dataset.from_arrays_cgrid(t, lat, lon, u_wrong, v)
+        with pytest.raises(ValueError, match=r"vectors\['current'\]\['u'\]"):
+            Dataset.from_arrays_cgrid(t, lat, lon, _uv_vectors(u_wrong, v))
 
     def test_rejects_wrong_v_shape(self):
         t, lat, lon, u, v = self._cgrid_inputs()
         v_wrong = np.zeros((3, 6, 8), dtype=np.float32)  # nlat instead of nlat-1
-        with pytest.raises(ValueError, match="v_values"):
-            Dataset.from_arrays_cgrid(t, lat, lon, u, v_wrong)
+        with pytest.raises(ValueError, match=r"vectors\['current'\]\['v'\]"):
+            Dataset.from_arrays_cgrid(t, lat, lon, _uv_vectors(u, v_wrong))
 
     def test_rejects_wrong_tracer_shape(self):
         t, lat, lon, u, v = self._cgrid_inputs()
         bad = np.zeros((3, 5, 8), dtype=np.float32)
         with pytest.raises(ValueError, match="tracers"):
-            Dataset.from_arrays_cgrid(t, lat, lon, u, v, tracers={"sst": bad})
+            Dataset.from_arrays_cgrid(
+                t, lat, lon, _uv_vectors(u, v), tracers={"sst": bad},
+            )
+
+    def test_rejects_empty_vectors(self):
+        t, lat, lon, _, _ = self._cgrid_inputs()
+        with pytest.raises(ValueError, match="at least one vector"):
+            Dataset.from_arrays_cgrid(t, lat, lon, {})
+
+    def test_rejects_duplicate_field_name_across_vectors(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        # Same u-field name reused in a second vector.
+        with pytest.raises(ValueError, match="Duplicate field name 'u'"):
+            Dataset.from_arrays_cgrid(
+                t, lat, lon,
+                {
+                    "current": {"u": ("u", u), "v": ("v", v)},
+                    "wind":    {"u": ("u", u), "v": ("v_wind", v)},
+                },
+            )
+
+    def test_rejects_tracer_name_colliding_with_vector(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        sst = np.full((3, 6, 8), 15.0, dtype=np.float32)
+        with pytest.raises(ValueError, match="Duplicate field name 'u'"):
+            Dataset.from_arrays_cgrid(
+                t, lat, lon, _uv_vectors(u, v), tracers={"u": sst},
+            )
+
+    def test_rejects_vectors_missing_uv_keys(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        with pytest.raises(ValueError, match=r"vectors\['current'\] must declare"):
+            Dataset.from_arrays_cgrid(
+                t, lat, lon, {"current": {"u": ("u", u)}},
+            )
+
+    def test_multiple_vectors_share_grid(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        # Surface current vs. 10-m wind on the same C-grid.
+        u_wind = (2.0 * np.ones_like(u)).astype(np.float32)
+        v_wind = (3.0 * np.ones_like(v)).astype(np.float32)
+        ds = Dataset.from_arrays_cgrid(
+            t, lat, lon,
+            {
+                "current": {"u": ("uo",  u),      "v": ("vo",  v)},
+                "wind":    {"u": ("u10", u_wind), "v": ("v10", v_wind)},
+            },
+        )
+        assert set(ds.fields) == {"uo", "vo", "u10", "v10"}
+        for name in ("uo", "u10"):
+            assert ds[name].stagger == "u_face"
+            assert ds[name].values.shape == u.shape
+        for name in ("vo", "v10"):
+            assert ds[name].stagger == "v_face"
+            assert ds[name].values.shape == v.shape
+        # All U fields share staggered coords; same for V.
+        assert jnp.allclose(ds["uo"].lon_coords, ds["u10"].lon_coords)
+        assert jnp.allclose(ds["uo"].lat_coords, ds["u10"].lat_coords)
+        assert jnp.allclose(ds["vo"].lon_coords, ds["v10"].lon_coords)
+        assert jnp.allclose(ds["vo"].lat_coords, ds["v10"].lat_coords)
+        # Distinct values per vector.
+        assert float(ds["uo"].values.mean())  == pytest.approx(1.0)
+        assert float(ds["u10"].values.mean()) == pytest.approx(2.0)
+        assert float(ds["vo"].values.mean())  == pytest.approx(0.0)
+        assert float(ds["v10"].values.mean()) == pytest.approx(3.0)
+
+    def test_velocity_interp_picks_named_vector(self):
+        t, lat, lon, u, v = self._cgrid_inputs()
+        u_wind = (2.0 * np.ones_like(u)).astype(np.float32)
+        v_wind = (3.0 * np.ones_like(v)).astype(np.float32)
+        ds = Dataset.from_arrays_cgrid(
+            t, lat, lon,
+            {
+                "current": {"u": ("uo",  u),      "v": ("vo",  v)},
+                "wind":    {"u": ("u10", u_wind), "v": ("v10", v_wind)},
+            },
+        )
+        q = (jnp.asarray(0.0), jnp.asarray(0.0), jnp.asarray(13.5))
+        vu_current = ds.velocity_interp(*q, u_name="uo",  v_name="vo")
+        vu_wind    = ds.velocity_interp(*q, u_name="u10", v_name="v10")
+        assert float(vu_current[1]) == pytest.approx(1.0)  # U from "current"
+        assert float(vu_current[0]) == pytest.approx(0.0)  # V from "current"
+        assert float(vu_wind[1])    == pytest.approx(2.0)  # U from "wind"
+        assert float(vu_wind[0])    == pytest.approx(3.0)  # V from "wind"
 
     def test_from_xarray_cgrid_matches_from_arrays_cgrid(self):
         t = np.array(["2020-01-01", "2020-01-02", "2020-01-03"], dtype="datetime64[D]")
@@ -395,10 +487,10 @@ class TestDatasetCGrid:
         )
         from_xr = Dataset.from_xarray_cgrid(
             ds_xr,
-            u_name="uo", v_name="vo",
+            vectors={"current": {"u": ("u", "uo"), "v": ("v", "vo")}},
             coordinates={"time": "time", "lat": "lat", "lon": "lon"},
         )
-        from_arr = Dataset.from_arrays_cgrid(t, lat, lon, u_data, v_data)
+        from_arr = Dataset.from_arrays_cgrid(t, lat, lon, _uv_vectors(u_data, v_data))
         assert jnp.allclose(from_xr["u"].values, from_arr["u"].values)
         assert jnp.allclose(from_xr["v"].values, from_arr["v"].values)
         assert jnp.allclose(from_xr["u"].lon_coords, from_arr["u"].lon_coords)
@@ -424,11 +516,44 @@ class TestDatasetCGrid:
         )
         ds = Dataset.from_xarray_cgrid(
             ds_xr,
-            u_name="uo", v_name="vo",
+            vectors={"current": {"u": ("u", "uo"), "v": ("v", "vo")}},
             coordinates={"time": "time", "lat": "lat", "lon": "lon"},
             staggered_coordinates={"u_lon": "lon_u"},
         )
         assert jnp.allclose(ds["u"].lon_coords, jnp.asarray(explicit_u_lon))
+
+    def test_from_xarray_cgrid_multiple_vectors(self):
+        t = np.linspace(0.0, 7200.0, 3)
+        lat = np.linspace(0.0, 4.0, 5)
+        lon = np.linspace(0.0, 6.0, 7)
+        u_curr = np.full((3, 5, 6), 0.1, dtype=np.float32)
+        v_curr = np.full((3, 4, 7), 0.2, dtype=np.float32)
+        u_wind = np.full((3, 5, 6), 5.0, dtype=np.float32)
+        v_wind = np.full((3, 4, 7), 7.0, dtype=np.float32)
+        ds_xr = xr.Dataset(
+            {
+                "uo":  (["time", "lat", "lon_u"], u_curr),
+                "vo":  (["time", "lat_v", "lon"], v_curr),
+                "u10": (["time", "lat", "lon_u"], u_wind),
+                "v10": (["time", "lat_v", "lon"], v_wind),
+            },
+            coords={
+                "time": t, "lat": lat, "lon": lon,
+                "lon_u": lon[:-1] + 0.5 * (lon[1] - lon[0]),
+                "lat_v": lat[:-1] + 0.5 * (lat[1] - lat[0]),
+            },
+        )
+        ds = Dataset.from_xarray_cgrid(
+            ds_xr,
+            vectors={
+                "current": {"u": ("uo",  "uo"),  "v": ("vo",  "vo")},
+                "wind":    {"u": ("u10", "u10"), "v": ("v10", "v10")},
+            },
+            coordinates={"time": "time", "lat": "lat", "lon": "lon"},
+        )
+        assert set(ds.fields) == {"uo", "vo", "u10", "v10"}
+        assert float(ds["u10"].values.mean()) == pytest.approx(5.0)
+        assert float(ds["v10"].values.mean()) == pytest.approx(7.0)
 
     def test_analytic_trajectory_linear_velocity(self):
         """U(lon)=α·lon, V(lat)=β·lat on a C-grid → trajectory grows
@@ -456,7 +581,7 @@ class TestDatasetCGrid:
             beta * v_lat[None, :, None], (nt, nlat - 1, nlon),
         ).astype(np.float32)
 
-        dataset = Dataset.from_arrays_cgrid(t, lat, lon, u_arr, v_arr)
+        dataset = Dataset.from_arrays_cgrid(t, lat, lon, _uv_vectors(u_arr, v_arr))
 
         # Treat U/V as degrees/second directly so the test isolates the
         # C-grid interpolation + solver from the meters_to_degrees conversion.

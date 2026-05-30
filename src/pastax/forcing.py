@@ -442,8 +442,7 @@ class Dataset(eqx.Module):
         t: Array,
         center_lat: Array,
         center_lon: Array,
-        u_values: Array,
-        v_values: Array,
+        vectors: dict[str, dict[Literal["u", "v"], tuple[str, Array]]],
         tracers: dict[str, Array] | None = None,
         *,
         u_lat: Array | None = None,
@@ -457,47 +456,71 @@ class Dataset(eqx.Module):
         """Build a Dataset on a NEMO-convention Arakawa C-grid.
 
         The centre grid ``(center_lat, center_lon)`` carries any tracer
-        fields. U lives on the east faces of the centre cells (one fewer
-        longitude column) and V lives on the north faces (one fewer
-        latitude row). When the staggered coordinate arrays are omitted
-        they are auto-derived from the centre grid as half-cell shifts
-        (see :meth:`Grid.u_face_coords` / :meth:`Grid.v_face_coords`).
+        fields. Each vector field has its U component on the east faces
+        of the centre cells (one fewer longitude column) and its V
+        component on the north faces (one fewer latitude row). Several
+        vector fields can share the same C-grid — e.g. surface current
+        and 10-m wind, or geostrophic / Ekman / Stokes velocity
+        components — by registering additional entries in ``vectors``.
+        When the staggered coordinate arrays are omitted they are
+        auto-derived from the centre grid as half-cell shifts (see
+        :meth:`Grid.u_face_coords` / :meth:`Grid.v_face_coords`) and
+        shared by every registered vector.
 
         Args:
             t: 1-D time coordinates (seconds or NumPy ``datetime64``).
             center_lat: 1-D centre latitudes (degrees), equally spaced.
             center_lon: 1-D centre longitudes (degrees), equally spaced.
-            u_values: U-component values, shape ``(time, nlat, nlon - 1)``.
-            v_values: V-component values, shape ``(time, nlat - 1, nlon)``.
+            vectors: Mapping ``{group_name: {"u": (field_name, u_array),
+                "v": (field_name, v_array)}}``. The outer key is a free-form
+                label for the vector pair (e.g. ``"current"``, ``"wind"``,
+                ``"geostrophic"``) and is used only in error messages. The
+                inner ``(field_name, array)`` tuples give the names under
+                which each component is registered in ``Dataset.fields``
+                (and how :meth:`velocity_interp` finds them via ``u_name`` /
+                ``v_name``) and the corresponding values. U arrays have
+                shape ``(time, nlat, nlon - 1)``; V arrays have shape
+                ``(time, nlat - 1, nlon)``. At least one vector must be
+                supplied; field names must be unique across all vectors
+                and tracers.
             tracers: Optional mapping ``{name: array of shape (time, nlat, nlon)}``
                 for additional fields at cell centres.
             u_lat: Override for U latitudes (defaults to ``center_lat``).
+                Shared by every registered U field.
             u_lon: Override for U longitudes (defaults to centre lons shifted
-                east by half a cell, length ``nlon - 1``).
+                east by half a cell, length ``nlon - 1``). Shared by every
+                registered U field.
             v_lat: Override for V latitudes (defaults to centre lats shifted
-                north by half a cell, length ``nlat - 1``).
+                north by half a cell, length ``nlat - 1``). Shared by every
+                registered V field.
             v_lon: Override for V longitudes (defaults to ``center_lon``).
+                Shared by every registered V field.
             dtype: JAX dtype for all arrays (default float32).
             lon_period: If set (e.g. ``360.0``), the centre grid is treated
                 as periodic in longitude. Tracer fields receive
                 ``lon_period``; U/V faces do not (their coordinate arrays
                 no longer span a full period, so periodic wrapping would be
                 ill-defined at first order).
-            masks: Optional land masks keyed by field name (``"u"``, ``"v"``,
-                or any tracer name). Each mask is a 2-D bool array; the
-                expected shape per field is
-                ``(nlat, nlon - 1)`` for ``"u"``,
-                ``(nlat - 1, nlon)`` for ``"v"``,
-                and ``(nlat, nlon)`` for tracers. When a field is absent
-                from ``masks``, a mask is inferred from NaN locations in
-                that field's values array. NaN values are always replaced
-                with 0 in the stored ``values``.
+            masks: Optional land masks keyed by the field names declared in
+                ``vectors`` and ``tracers``. Each mask is a 2-D bool array;
+                the expected shape per field is ``(nlat, nlon - 1)`` for a
+                U-face field, ``(nlat - 1, nlon)`` for a V-face field, and
+                ``(nlat, nlon)`` for a tracer. When a field is absent from
+                ``masks``, a mask is inferred from NaN locations in that
+                field's values array. NaN values are always replaced with
+                0 in the stored ``values``.
 
         Returns:
-            Dataset with ``fields={"u": Field(stagger="u_face"),
-            "v": Field(stagger="v_face"), **tracers}`` and a C-grid
-            :class:`Grid` metadata object.
+            Dataset with one ``Field(stagger="u_face")`` and one
+            ``Field(stagger="v_face")`` per registered vector (plus any
+            tracers) and a C-grid :class:`Grid` metadata object.
         """
+        if not vectors:
+            raise ValueError(
+                "from_arrays_cgrid requires at least one vector field; got "
+                "an empty 'vectors' mapping."
+            )
+
         t = _coerce_time_to_seconds(t)
         t_arr   = jnp.asarray(t,           dtype=dtype)
         lat_arr = jnp.asarray(center_lat,  dtype=dtype)
@@ -506,11 +529,6 @@ class Dataset(eqx.Module):
         nt   = int(t_arr.shape[0])
         nlat = int(lat_arr.shape[0])
         nlon = int(lon_arr.shape[0])
-
-        u_arr = jnp.asarray(u_values, dtype=dtype)
-        v_arr = jnp.asarray(v_values, dtype=dtype)
-        _check_cgrid_shape("u_values", u_arr.shape, (nt, nlat, nlon - 1))
-        _check_cgrid_shape("v_values", v_arr.shape, (nt, nlat - 1, nlon))
 
         grid = Grid(
             t_coords=t_arr,
@@ -533,28 +551,64 @@ class Dataset(eqx.Module):
         _check_cgrid_shape("v_lon", v_lon_arr.shape, (nlon,))
 
         masks = masks or {}
-        u_clean, u_mask = _resolve_mask(
-            u_arr, masks.get("u"),
-            expected_mask_shape=(nlat, nlon - 1), field_name="u",
-        )
-        v_clean, v_mask = _resolve_mask(
-            v_arr, masks.get("v"),
-            expected_mask_shape=(nlat - 1, nlon), field_name="v",
-        )
-        loaded: dict[str, Field] = {
-            "u": Field(
+        loaded: dict[str, Field] = {}
+
+        for group, entry in vectors.items():
+            if set(entry.keys()) != {"u", "v"}:
+                raise ValueError(
+                    f"vectors[{group!r}] must declare exactly the keys "
+                    f"{{'u', 'v'}}; got {sorted(entry.keys())!r}."
+                )
+            u_field_name, u_values = entry["u"]
+            v_field_name, v_values = entry["v"]
+            if u_field_name in loaded:
+                raise ValueError(
+                    f"Duplicate field name {u_field_name!r} declared by "
+                    f"vectors[{group!r}]['u']."
+                )
+            if v_field_name in loaded:
+                raise ValueError(
+                    f"Duplicate field name {v_field_name!r} declared by "
+                    f"vectors[{group!r}]['v']."
+                )
+
+            u_arr = jnp.asarray(u_values, dtype=dtype)
+            v_arr = jnp.asarray(v_values, dtype=dtype)
+            _check_cgrid_shape(
+                f"vectors[{group!r}]['u'] ({u_field_name!r})",
+                u_arr.shape, (nt, nlat, nlon - 1),
+            )
+            _check_cgrid_shape(
+                f"vectors[{group!r}]['v'] ({v_field_name!r})",
+                v_arr.shape, (nt, nlat - 1, nlon),
+            )
+
+            u_clean, u_mask = _resolve_mask(
+                u_arr, masks.get(u_field_name),
+                expected_mask_shape=(nlat, nlon - 1), field_name=u_field_name,
+            )
+            v_clean, v_mask = _resolve_mask(
+                v_arr, masks.get(v_field_name),
+                expected_mask_shape=(nlat - 1, nlon), field_name=v_field_name,
+            )
+            loaded[u_field_name] = Field(
                 values=u_clean, t_coords=t_arr,
                 lat_coords=u_lat_arr, lon_coords=u_lon_arr,
                 lon_period=None, stagger="u_face", mask=u_mask,
-            ),
-            "v": Field(
+            )
+            loaded[v_field_name] = Field(
                 values=v_clean, t_coords=t_arr,
                 lat_coords=v_lat_arr, lon_coords=v_lon_arr,
                 lon_period=None, stagger="v_face", mask=v_mask,
-            ),
-        }
+            )
+
         if tracers:
             for name, arr in tracers.items():
+                if name in loaded:
+                    raise ValueError(
+                        f"Duplicate field name {name!r}: tracer collides "
+                        "with a vector component."
+                    )
                 a = jnp.asarray(arr, dtype=dtype)
                 _check_cgrid_shape(f"tracers[{name!r}]", a.shape, (nt, nlat, nlon))
                 tr_clean, tr_mask = _resolve_mask(
@@ -572,8 +626,7 @@ class Dataset(eqx.Module):
     def from_xarray_cgrid(
         ds: xr.Dataset,
         *,
-        u_name: str,
-        v_name: str,
+        vectors: dict[str, dict[Literal["u", "v"], tuple[str, str]]],
         coordinates: dict[str, str],
         tracers: dict[str, str] | None = None,
         staggered_coordinates: dict[str, str] | None = None,
@@ -586,14 +639,21 @@ class Dataset(eqx.Module):
         Centre coordinates (used for time and tracer fields) come from
         ``coordinates``; staggered U/V coordinates are auto-derived from
         the centre grid as half-cell shifts unless overridden via
-        ``staggered_coordinates``.
+        ``staggered_coordinates``. Multiple vector fields living on the
+        same C-grid (e.g. surface current and 10-m wind) are declared as
+        separate entries in ``vectors``.
 
         Args:
             ds: Source xarray Dataset.
-            u_name: xarray variable name for the U component
-                (shape ``(time, nlat, nlon - 1)``).
-            v_name: xarray variable name for the V component
-                (shape ``(time, nlat - 1, nlon)``).
+            vectors: Mapping ``{group_name: {"u": (field_name, xarray_var_name),
+                "v": (field_name, xarray_var_name)}}``. The outer key is a
+                free-form label for the vector pair (e.g. ``"current"``,
+                ``"wind"``). Each inner ``(field_name, xarray_var_name)``
+                tuple says which xarray variable holds the values and under
+                which name to register the resulting Field in
+                ``Dataset.fields``. U variables have shape
+                ``(time, nlat, nlon - 1)``; V variables have shape
+                ``(time, nlat - 1, nlon)``.
             coordinates: Mapping with keys ``"time"``, ``"lat"``, ``"lon"``
                 → xarray coord names for the centre grid.
             tracers: Optional ``{internal_name: xarray_variable_name}`` for
@@ -601,22 +661,35 @@ class Dataset(eqx.Module):
             staggered_coordinates: Optional override mapping with any
                 subset of keys ``"u_lat"``, ``"u_lon"``, ``"v_lat"``,
                 ``"v_lon"`` → xarray coord names. Unspecified keys are
-                auto-derived.
+                auto-derived. The overrides are shared by every registered
+                vector.
             dtype: JAX dtype for all arrays (default float32).
             lon_period: Forwarded to :meth:`from_arrays_cgrid`.
-            masks: Forwarded to :meth:`from_arrays_cgrid` (per-field
-                ``{"u", "v", <tracer_name>}`` keys).
+            masks: Forwarded to :meth:`from_arrays_cgrid`. Keys must match
+                the field names declared in ``vectors`` and ``tracers``.
 
         Returns:
             Dataset with C-grid stagger and :class:`Grid` metadata.
         """
         stag = staggered_coordinates or {}
+        arr_vectors: dict[str, dict[Literal["u", "v"], tuple[str, Array]]] = {}
+        for group, entry in vectors.items():
+            if set(entry.keys()) != {"u", "v"}:
+                raise ValueError(
+                    f"vectors[{group!r}] must declare exactly the keys "
+                    f"{{'u', 'v'}}; got {sorted(entry.keys())!r}."
+                )
+            u_field_name, u_xr = entry["u"]
+            v_field_name, v_xr = entry["v"]
+            arr_vectors[group] = {
+                "u": (u_field_name, ds[u_xr].values),
+                "v": (v_field_name, ds[v_xr].values),
+            }
         return Dataset.from_arrays_cgrid(
             t=ds[coordinates["time"]].values,
             center_lat=ds[coordinates["lat"]].values,
             center_lon=ds[coordinates["lon"]].values,
-            u_values=ds[u_name].values,
-            v_values=ds[v_name].values,
+            vectors=arr_vectors,
             tracers={
                 internal: ds[xr_name].values
                 for internal, xr_name in (tracers or {}).items()
