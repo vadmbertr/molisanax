@@ -588,15 +588,16 @@ def _scan(body, init, xs, adjoint, checkpoints):
     """Run the integration loop with the chosen differentiation strategy.
 
     ``"checkpointed"`` uses Equinox's binomial-checkpointing scan (treeverse): low
-    reverse-mode memory but not forward-mode autodifferentiable. ``"direct"`` uses a
-    plain ``lax.scan`` (with per-step ``jax.checkpoint``, transparent to ``jvp``) and
-    supports both forward and reverse mode.
+    reverse-mode memory, but ``jax.jvp`` is not supported. ``"forward"`` uses a plain
+    ``jax.lax.scan`` (no per-step checkpoint) — tangents propagate with O(1) extra
+    state per step under ``jax.jvp`` / ``jax.jacfwd``, mirroring
+    ``diffrax.ForwardMode``.
     """
     if adjoint == "checkpointed":
         return eqxi.scan(body, init, xs, kind="checkpointed", checkpoints=checkpoints)
-    if adjoint == "direct":
-        return jax.lax.scan(jax.checkpoint(body), init, xs)
-    raise ValueError(f'adjoint must be "checkpointed" or "direct", got {adjoint!r}.')
+    if adjoint == "forward":
+        return jax.lax.scan(body, init, xs)
+    raise ValueError(f'adjoint must be "checkpointed" or "forward", got {adjoint!r}.')
 
 
 def _run_ode(
@@ -748,8 +749,10 @@ def solve(
         adjoint: Differentiation strategy for the integration loop.
             ``"checkpointed"`` (default) uses binomial checkpointing (treeverse) for
             low reverse-mode memory, but is **reverse-mode only** — ``jax.jvp`` is not
-            supported. ``"direct"`` uses a plain scan that supports **both** ``jax.grad``
-            and ``jax.jvp`` at O(n_fine) memory.
+            supported. ``"forward"`` uses a plain ``jax.lax.scan`` (no per-step
+            checkpoint) ideal for forward-mode AD (``jax.jvp`` / ``jax.jacfwd``);
+            mirrors ``diffrax.ForwardMode``. Reverse mode also works through this path
+            at full O(n_fine) activation memory.
         checkpoints: Memory knob for ``adjoint="checkpointed"`` (ignored otherwise).
             ``None`` (default) forwards to ``equinox.internal.scan``'s built-in
             ``O(sqrt(n_fine))`` Stumm–Walther online schedule — the same default that
@@ -765,8 +768,8 @@ def solve(
     if solver is None:
         solver = Heun()
 
-    if adjoint not in ("checkpointed", "direct"):
-        raise ValueError(f'adjoint must be "checkpointed" or "direct", got {adjoint!r}.')
+    if adjoint not in ("checkpointed", "forward"):
+        raise ValueError(f'adjoint must be "checkpointed" or "forward", got {adjoint!r}.')
 
     n_substeps = round(save_dt / int_dt)
     if n_substeps < 1:
