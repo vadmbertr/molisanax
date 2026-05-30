@@ -59,7 +59,6 @@ solver sign-abs-normalises the ``sqrt(dt)`` factor.
 from __future__ import annotations
 
 import abc
-import math
 from typing import Callable
 
 import equinox as eqx
@@ -752,10 +751,12 @@ def solve(
             supported. ``"direct"`` uses a plain scan that supports **both** ``jax.grad``
             and ``jax.jvp`` at O(n_fine) memory.
         checkpoints: Memory knob for ``adjoint="checkpointed"`` (ignored otherwise).
-            ``None`` (default) uses ``ceil(log2(n_fine))`` checkpoints → O(log n_fine)
-            memory and O(n_fine·log n_fine) recompute. A larger int trades memory for less
-            recompute (e.g. ``~sqrt(n_fine)`` → O(sqrt n_fine) memory, O(n_fine) time);
-            ``"all"`` checkpoints every step (O(n_fine) memory, no recompute).
+            ``None`` (default) forwards to ``equinox.internal.scan``'s built-in
+            ``O(sqrt(n_fine))`` Stumm–Walther online schedule — the same default that
+            ``diffrax.RecursiveCheckpointAdjoint`` uses, balancing memory against
+            backward recompute. A smaller int (e.g. ``ceil(log2(n_fine))``) saves
+            memory at the cost of more recompute; a larger int (or ``"all"`` for one
+            per step) trades memory for less recompute.
 
     Returns:
         Shape ``(n_save + 1, 2)`` in ODE mode or SDE with ``n_samples == 1``.
@@ -779,9 +780,6 @@ def solve(
         )
     n_fine = n_save * n_substeps
     ts_fine = t0 + jnp.arange(n_fine + 1) * int_dt
-
-    if adjoint == "checkpointed" and checkpoints is None:
-        checkpoints = max(1, math.ceil(math.log2(max(n_fine, 2))))
 
     if key is not None:
         if n_samples == 1:
