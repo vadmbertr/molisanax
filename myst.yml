@@ -29,3 +29,4 @@ site:
     logo: docs/_static/pastax-logo.png
     favicon: docs/_static/pastax-logo.png
     style: docs/_static/myst-extra.css
+    outline_maxdepth: 2
