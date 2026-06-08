@@ -149,12 +149,17 @@ def _fix_math_nodes(node):
 
 
 def _rename_array_alias(node):
-    """Display jaxtyping's array type as ``jax.Array`` rather than the internal
-    ``jaxlib._jax.Array`` runtime class that autodoc resolves it to."""
+    """Tidy how autodoc renders jaxtyping annotations: show the array type as
+    ``jax.Array`` (not the internal ``jaxlib._jax.Array`` runtime class) and
+    drop the ``jaxtyping.`` module prefix from ``Float`` / ``Bool`` / etc."""
     if isinstance(node, dict):
         val = node.get("value")
-        if isinstance(val, str) and "jaxlib._jax.Array" in val:
-            node["value"] = val.replace("jaxlib._jax.Array", "jax.Array")
+        if isinstance(val, str):
+            if "jaxlib._jax.Array" in val:
+                val = val.replace("jaxlib._jax.Array", "jax.Array")
+            if "jaxtyping." in val:
+                val = val.replace("jaxtyping.", "")
+            node["value"] = val
         for child in node.get("children", []) or []:
             _rename_array_alias(child)
     elif isinstance(node, list):
