@@ -325,9 +325,9 @@ sep = separation_distance(trajectory, reference)          # (T,), metres
 nsd = normalized_separation_distance(trajectory, reference)  # (T,), dimensionless
 li  = liu_index(trajectory, reference)                    # (T,), dimensionless
 
-# Ensemble metrics — vmap handled automatically
-sep_ens = separation_distance(ensemble, reference, ensemble=True)  # (S, T)
-li_ens  = liu_index(ensemble, reference, ensemble=True)            # (S, T)
+# Ensemble metrics — broadcasting the ensemble leading axis
+sep_ens = separation_distance(ensemble, reference)  # (S, T)
+li_ens  = liu_index(ensemble, reference)            # (S, T)
 ```
 
 ### Scoring rules
