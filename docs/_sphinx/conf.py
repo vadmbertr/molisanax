@@ -12,7 +12,6 @@ the documentation.
 
 from __future__ import annotations
 
-import copy
 import json
 import pathlib
 import re
@@ -148,132 +147,6 @@ def _fix_math_nodes(node):
             _fix_math_nodes(child)
 
 
-def _rename_array_alias(node):
-    """Tidy how autodoc renders jaxtyping annotations: show the array type as
-    ``jax.Array`` (not the internal ``jaxlib._jax.Array`` runtime class) and
-    drop the ``jaxtyping.`` module prefix from ``Float`` / ``Bool`` / etc."""
-    if isinstance(node, dict):
-        val = node.get("value")
-        if isinstance(val, str):
-            if "jaxlib._jax.Array" in val:
-                val = val.replace("jaxlib._jax.Array", "jax.Array")
-            if "jaxtyping." in val:
-                val = val.replace("jaxtyping.", "")
-            node["value"] = val
-        for child in node.get("children", []) or []:
-            _rename_array_alias(child)
-    elif isinstance(node, list):
-        for child in node:
-            _rename_array_alias(child)
-
-
-# --- Class layout (Parameters / Attributes / Methods) ----------------------
-#
-# autodoc renders an eqx.Module class as one flat ``definitionList`` whose body
-# interleaves: a sparse constructor "Parameters" field list (names + types, no
-# descriptions), the per-field attribute entries (name + description + type),
-# a duplicate annotation list (``id0``…``idN``, empty descriptions), and the
-# methods — none of them grouped. We reshape each class body into three clearly
-# labelled sections, mirroring the xarray API pages: a "Parameters" section
-# (the constructor contract), an "Attributes" section (the same fields, which
-# for a dataclass are the constructor args), and a "Methods" section with each
-# method's full inline docs. The empty annotation list and the sparse autodoc
-# "Parameters" block are dropped.
-
-
-def _strip_ids(node):
-    """Recursively remove anchors so a node can be duplicated without producing
-    duplicate identifiers (which fail mystmd ``--strict``)."""
-    if isinstance(node, dict):
-        node.pop("identifier", None)
-        node.pop("label", None)
-        node.pop("html_id", None)
-        for child in node.get("children", []) or []:
-            _strip_ids(child)
-    elif isinstance(node, list):
-        for child in node:
-            _strip_ids(child)
-    return node
-
-
-def _has_parameterlist(node):
-    """True if the signature node carries a ``sphinx-desc-parameterlist`` (i.e.
-    it is a callable member — a method — rather than an attribute)."""
-    if isinstance(node, dict):
-        cls = node.get("class") or ""
-        if isinstance(cls, str) and "parameterlist" in cls:
-            return True
-        if isinstance(cls, list) and any("parameterlist" in c for c in cls):
-            return True
-        for child in node.get("children", []) or []:
-            if _has_parameterlist(child):
-                return True
-    return False
-
-
-def _section_heading(identifier, title):
-    return {
-        "type": "heading",
-        "depth": 3,
-        "identifier": identifier,
-        "label": identifier,
-        "children": [{"type": "text", "value": title}],
-    }
-
-
-def _restructure_class_body(classid, dd):
-    prefix = classid + "."
-    lead, attrs, methods = [], [], []
-    for child in dd.get("children", []) or []:
-        if child.get("type") != "definitionList":
-            lead.append(child)
-            continue
-        kids = child.get("children", []) or []
-        term = kids[0] if kids else {}
-        ident = term.get("identifier") or ""
-        if ident.startswith(prefix):
-            (methods if _has_parameterlist(term) else attrs).append(child)
-        # Anything else (sparse "Parameters" block, ``idN`` annotation list) is
-        # redundant with the sections below and is dropped.
-    if not (attrs or methods):
-        return
-    new_children = list(lead)
-    if attrs:
-        new_children.append(_section_heading(classid + ".parameters", "Parameters"))
-        new_children.extend(_strip_ids(copy.deepcopy(attrs)))
-        new_children.append(_section_heading(classid + ".attributes", "Attributes"))
-        new_children.extend(attrs)
-    if methods:
-        new_children.append(_section_heading(classid + ".methods", "Methods"))
-        new_children.extend(methods)
-    dd["children"] = new_children
-
-
-def _restructure_classes(node):
-    if isinstance(node, dict):
-        if node.get("type") == "definitionList":
-            kids = node.get("children", []) or []
-            term = kids[0] if kids else {}
-            ident = term.get("identifier") or ""
-            if term.get("type") == "definitionTerm" and _TOP_LEVEL_ID.match(ident):
-                dd = next(
-                    (c for c in kids if c.get("type") == "definitionDescription"),
-                    None,
-                )
-                prefix = ident + "."
-                if dd is not None and any(
-                    c.get("type") == "definitionList"
-                    and ((c.get("children") or [{}])[0].get("identifier") or "").startswith(prefix)
-                    for c in dd.get("children", []) or []
-                ):
-                    _restructure_class_body(ident, dd)
-        for child in node.get("children", []) or []:
-            _restructure_classes(child)
-    elif isinstance(node, list):
-        for child in node:
-            _restructure_classes(child)
-
-
 def _inject_outline_headings(app, exception):  # noqa: D401 - sphinx hook
     if exception is not None:
         return
@@ -282,8 +155,6 @@ def _inject_outline_headings(app, exception):  # noqa: D401 - sphinx hook
         root = data.get("mdast", data)
         before = json.dumps(root)
         _fix_math_nodes(root)
-        _rename_array_alias(root)
-        _restructure_classes(root)
         _inject_into(root.get("children", []) or [])
         if json.dumps(root) != before:
             path.write_text(json.dumps(data))

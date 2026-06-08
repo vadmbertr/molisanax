@@ -19,8 +19,9 @@ Each score accepts a ``reduce`` argument:
   a non-negative-weighted sum of proper scoring rules is itself proper.
 
 The default distance kernel for :func:`squared_error` and
-:func:`energy_score` is :func:`l2_distance`. A user may pass any callable
-satisfying the broadcasting kernel contract — notably :func:`pastax.geo.haversine`
+:func:`energy_score` is the Euclidean distance. A user may pass any callable
+satisfying the broadcasting kernel contract — 
+notably :func:`pastax.metric.separation_distance`
 for great-circle distances on the sphere.
 """
 
