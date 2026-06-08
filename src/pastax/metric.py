@@ -27,9 +27,9 @@ __all__ = [
 def _cumulative_reference_length(
     y_ref: Float[Array, "*#batch time 2"],
 ) -> Float[Array, "*#batch time"]:
-    """Cumulative arc length of the reference trajectory, ``l_{o,i}``.
+    r"""Cumulative arc length of the reference trajectory, :math:`\mathrm{l_{o, t}}`.
 
-    ``l_{o,i}`` is the path length from the start to step ``i``; element 0 is 0
+    :math:`\mathrm{l_{o, t}}` is the path length from the start to time :math:`t`; element 0 is 0
     (no step precedes the first point). Broadcasts over leading axes.
     """
     steps = haversine(y_ref[..., 1:, :], y_ref[..., :-1, :])  # (..., time - 1)
@@ -57,10 +57,15 @@ def normalized_separation_distance(
     y: Float[Array, "*batch time 2"],
     y_ref: Float[Array, "*#batch time 2"],
 ) -> Float[Array, "*batch time"]:
-    """Instantaneous separation normalised by cumulative reference arc length.
+    r"""Instantaneous separation normalised by cumulative reference arc length.
 
-    ``nsd_t = d_t / l_{o,t}``, where ``d_t`` is the separation distance at step
-    ``t`` and ``l_{o,t}`` is the cumulative reference length at step ``t``.
+    .. math::
+
+        \mathrm{NSD}_t = \frac{\mathrm{sep\_dist}_t}{\mathrm{trav\_dist}_t}
+
+    where :math:`\mathrm{sep\_dist}_t` is the separation distance at time :math:`t`
+    and :math:`\mathrm{trav\_dist}_t` is the reference trajectory travel distance
+    at time :math:`t`.
 
     Args:
         y: Predicted trajectory/-ies, shape ``(..., T, 2)``.
@@ -76,13 +81,17 @@ def liu_index(
     y: Float[Array, "*batch time 2"],
     y_ref: Float[Array, "*#batch time 2"],
 ) -> Float[Array, "*batch time"]:
-    """Liu & Weisberg (2011) normalised cumulative Lagrangian separation.
+    r"""Liu & Weisberg (2011) normalised cumulative Lagrangian separation.
 
-    ``liu_t = (sum_{i<=t} d_i) / (sum_{i<=t} l_{o,i})``, where ``d_i`` is the
-    separation distance at step ``i`` and ``l_{o,i}`` is the *cumulative*
-    reference trajectory length at step ``i``. The denominator is thus a double
-    cumulative sum of the per-step distances (the cumulative sum of the
-    cumulative length).
+    .. math::
+
+        \mathrm{Liu}_t = \frac{\operatorname{cumsum}(\mathrm{sep\_dist})_t}
+        {\operatorname{cumsum}(\mathrm{trav\_dist})_t}
+
+    where :math:`\mathrm{sep\_dist}_t` is the separation distance at time :math:`t`
+    and :math:`\mathrm{trav\_dist}_t` is the reference trajectory travel distance
+    at time :math:`t`.
+    The denominator is thus a double cumulative sum of the per-step distances.
 
     Reference: Liu & Weisberg (2011), J. Geophys. Res.
 
