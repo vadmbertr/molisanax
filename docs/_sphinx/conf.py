@@ -123,6 +123,30 @@ def _inject_into(children):
         i += 1
 
 
+def _fix_math_nodes(node):
+    """Lift LaTeX from a math node's child text into its ``value``.
+
+    sphinx-ext-mystmd emits ``math`` / ``inlineMath`` nodes carrying their LaTeX
+    as a child ``text`` node and no top-level ``value``. mystmd's math transform
+    reads ``node.value`` and calls ``.match()`` on it, so an absent ``value``
+    crashes the HTML build with "Cannot read properties of undefined (reading
+    'match')". Per the MyST spec these are literal nodes: move the text into
+    ``value`` and drop the children."""
+    if isinstance(node, dict):
+        if node.get("type") in ("math", "inlineMath") and "value" not in node:
+            node["value"] = "".join(
+                c.get("value", "")
+                for c in node.get("children", []) or []
+                if isinstance(c, dict)
+            )
+            node["children"] = []
+        for child in node.get("children", []) or []:
+            _fix_math_nodes(child)
+    elif isinstance(node, list):
+        for child in node:
+            _fix_math_nodes(child)
+
+
 def _inject_outline_headings(app, exception):  # noqa: D401 - sphinx hook
     if exception is not None:
         return
@@ -130,6 +154,7 @@ def _inject_outline_headings(app, exception):  # noqa: D401 - sphinx hook
         data = json.loads(path.read_text())
         root = data.get("mdast", data)
         before = json.dumps(root)
+        _fix_math_nodes(root)
         _inject_into(root.get("children", []) or [])
         if json.dumps(root) != before:
             path.write_text(json.dumps(data))

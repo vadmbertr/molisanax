@@ -27,9 +27,12 @@ def haversine(
 
     .. math::
 
-        a &= \sin^2\!\left(\tfrac{\Delta\varphi}{2}\right)
-        + \cos\varphi_1 \cos\varphi_2 \sin^2\!\left(\tfrac{\Delta\lambda}{2}\right) \\
-        d &= 2 R \arcsin\!\sqrt{a}
+        a = \sin^2\!\left(\tfrac{\Delta\varphi}{2}\right)
+        + \cos\varphi_1 \cos\varphi_2 \sin^2\!\left(\tfrac{\Delta\lambda}{2}\right)
+
+    .. math::
+
+        d = 2 R \arcsin\!\sqrt{a}
 
     where :math:`\varphi` is latitude and :math:`\lambda` is longitude (in
     radians). The last axis of each input must have size 2 (lat, lon); leading
