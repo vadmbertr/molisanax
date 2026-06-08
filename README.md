@@ -353,11 +353,9 @@ es_agg = energy_score(ens, ref, reduce="sum")  # scalar
 se_agg = squared_error(ens, ref, reduce="sum")  # scalar
 vs_agg = variogram_score(ens, ref, reduce="sum")  # scalar
 
-from pastax import haversine
-
 # Custom score kernel (relevant for the energy score and the square error only)
-es_agg = energy_score(ens, ref, kernel=haversine)
-se_agg = squared_error(ens, ref, kernel=haversine)
+es_agg = energy_score(ens, ref, kernel=separation_distance)
+se_agg = squared_error(ens, ref, kernel=separation_distance)
 ```
 
 ## API Reference

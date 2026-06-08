@@ -47,3 +47,29 @@ pre code {
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+
+/*
+ * API reference parameter / attribute / return lists.
+ *
+ * Napoleon renders these as field lists whose entries read
+ *   **name** (*type*) -- description
+ * i.e. the name is already <strong>, the type <em>. The book-theme colours
+ * the inline <code> tokens (and the body text) with a muted accent, which
+ * makes the dense type signatures hard to read. Force the whole entry to a
+ * near-black colour and let the inline code read as plain text — bold for the
+ * name, italic for the type, regular for the description — instead of a
+ * coloured code chip.
+ */
+article.content dl dt,
+article.content dl dd,
+article.content dl dd p,
+article.content dl dd li {
+  color: #1a1a1a;
+}
+
+article.content dl dt :not(pre) > code,
+article.content dl dd :not(pre) > code {
+  color: inherit;
+  background: transparent;
+  font-weight: inherit;
+}
