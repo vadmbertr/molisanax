@@ -147,6 +147,20 @@ def _fix_math_nodes(node):
             _fix_math_nodes(child)
 
 
+def _rename_array_alias(node):
+    """Display jaxtyping's array type as ``jax.Array`` rather than the internal
+    ``jaxlib._jax.Array`` runtime class that autodoc resolves it to."""
+    if isinstance(node, dict):
+        val = node.get("value")
+        if isinstance(val, str) and "jaxlib._jax.Array" in val:
+            node["value"] = val.replace("jaxlib._jax.Array", "jax.Array")
+        for child in node.get("children", []) or []:
+            _rename_array_alias(child)
+    elif isinstance(node, list):
+        for child in node:
+            _rename_array_alias(child)
+
+
 def _inject_outline_headings(app, exception):  # noqa: D401 - sphinx hook
     if exception is not None:
         return
@@ -155,6 +169,7 @@ def _inject_outline_headings(app, exception):  # noqa: D401 - sphinx hook
         root = data.get("mdast", data)
         before = json.dumps(root)
         _fix_math_nodes(root)
+        _rename_array_alias(root)
         _inject_into(root.get("children", []) or [])
         if json.dumps(root) != before:
             path.write_text(json.dumps(data))
