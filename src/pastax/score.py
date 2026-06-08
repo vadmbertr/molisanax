@@ -78,9 +78,12 @@ def squared_error(
     reduce: Reduce = None,
     weights: Float[Array, " T"] | None = None,
 ) -> Float[Array, " T"] | Float[Array, ""]:
-    """Squared distance between ensemble mean and observation.
+    r"""Squared distance between ensemble mean and observation.
 
-    ``SE_t = kernel(mean_s forecast[s, t], obs[t]) ** 2``.
+    .. math::
+
+        \mathrm{SE}_t = \operatorname{kernel}\!\left(
+        \operatorname{mean}_s \mathrm{forecast}[s, t],\ \mathrm{obs}[t]\right)^2
 
     With the default L2 kernel this is the squared error of the ensemble
     mean (Pic et al. 2025, Eq. 11).
@@ -109,11 +112,19 @@ def dawid_sebastiani(
     reduce: Reduce = None,
     weights: Float[Array, " T"] | None = None,
 ) -> Float[Array, " T"] | Float[Array, ""]:
-    """Dawid-Sebastiani score: ``log det Sigma_t + (mu_t - y_t)^T Sigma_t^{-1} (mu_t - y_t)``.
+    r"""Dawid-Sebastiani score: Gaussian log-likelihood of the observation under the ensemble.
 
-    ``Sigma_t`` is the unbiased (``ddof=1``) sample covariance of the ensemble
-    at time ``t``. Requires ``S >= 3`` for ``Sigma_t`` to be a.s. full-rank
-    on ``R^2``; for ``S <= 2`` the score is undefined (singular covariance).
+    The per-time score is
+
+    .. math::
+
+        \mathrm{DS}_t = \log\det \Sigma_t
+        + (\mu_t - y_t)^{\top}\, \Sigma_t^{-1}\, (\mu_t - y_t)
+
+    where :math:`\Sigma_t` is the unbiased (``ddof=1``) sample covariance of the
+    ensemble at time :math:`t`. Requires :math:`S \geq 3` for :math:`\Sigma_t` to
+    be a.s. full-rank on :math:`\mathbb{R}^2`; for :math:`S \leq 2` the score is
+    undefined (singular covariance).
 
     Args:
         forecast: Ensemble forecast, shape ``(S, T, 2)``, with ``S >= 3``.
@@ -147,15 +158,18 @@ def energy_score(
     reduce: Reduce = None,
     weights: Float[Array, " T"] | None = None,
 ) -> Float[Array, " T"] | Float[Array, ""]:
-    """Energy score (Pic et al. 2025, Eq. 12) — unbiased Monte Carlo estimator.
+    r"""Energy score (Pic et al. 2025, Eq. 12) — unbiased Monte Carlo estimator.
 
-    ``ES_t = (1/S) sum_s d(X_t^{(s)}, y_t)^alpha
-            - (1/(2 S (S-1))) sum_{s != s'} d(X_t^{(s)}, X_t^{(s')})^alpha``
+    .. math::
+
+        \mathrm{ES}_t = \frac{1}{S} \sum_s d\!\left(X_t^{(s)}, y_t\right)^{\alpha}
+        - \frac{1}{2 S (S-1)} \sum_{s \neq s'}
+        d\!\left(X_t^{(s)}, X_t^{(s')}\right)^{\alpha}
 
     The pairwise term is computed as a full ``(S, S)`` mean (including the
     zero diagonal) multiplied by ``S/(S-1)``, which recovers the unbiased
-    off-diagonal estimator exactly. Strictly proper for L2 kernel and
-    ``alpha in (0, 2)``; propriety with other kernels is not guaranteed.
+    off-diagonal estimator exactly. Strictly proper for the L2 kernel and
+    :math:`\alpha \in (0, 2)`; propriety with other kernels is not guaranteed.
 
     Args:
         forecast: Ensemble forecast, shape ``(S, T, 2)``, with ``S >= 2``.
@@ -188,11 +202,15 @@ def variogram_score(
     reduce: Reduce = None,
     weights: Float[Array, " T"] | None = None,
 ) -> Float[Array, " T"] | Float[Array, ""]:
-    """Variogram score of order ``p`` (Pic et al. 2025, Eq. 13).
+    r"""Variogram score of order ``p`` (Pic et al. 2025, Eq. 13).
 
-    ``VS_t = sum_{i,j} w_{ij} (E_F[|X_{t,i} - X_{t,j}|^p] - |y_{t,i} - y_{t,j}|^p)^2``
+    .. math::
 
-    Sums over both component pairs ``(i, j)``; with the default
+        \mathrm{VS}_t = \sum_{i,j} w_{ij} \left(
+        \mathbb{E}_F\!\left[\,|X_{t,i} - X_{t,j}|^{p}\right]
+        - |y_{t,i} - y_{t,j}|^{p}\right)^2
+
+    Sums over both component pairs :math:`(i, j)`; with the default
     ``component_weights = 1 - I``, the diagonal contribution (zero) is masked
     out and the off-diagonal pair is counted twice (symmetric formulation).
 
