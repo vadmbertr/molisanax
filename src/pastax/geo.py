@@ -20,11 +20,20 @@ def haversine(
     y1: Float[Array, "... 2"],
     y2: Float[Array, "... 2"],
 ) -> Float[Array, "..."]:
-    """Great-circle distance between ``[lat, lon]`` points.
+    r"""Great-circle distance between ``[lat, lon]`` points.
 
     Uses the spherical haversine formula with :data:`EARTH_RADIUS` as the
-    sphere radius. The last axis of each input must have size 2 (lat, lon);
-    leading axes broadcast under standard NumPy/JAX rules.
+    sphere radius :math:`R`:
+
+    .. math::
+
+        a &= \sin^2\!\left(\tfrac{\Delta\varphi}{2}\right)
+        + \cos\varphi_1 \cos\varphi_2 \sin^2\!\left(\tfrac{\Delta\lambda}{2}\right) \\
+        d &= 2 R \arcsin\!\sqrt{a}
+
+    where :math:`\varphi` is latitude and :math:`\lambda` is longitude (in
+    radians). The last axis of each input must have size 2 (lat, lon); leading
+    axes broadcast under standard NumPy/JAX rules.
 
     Args:
         y1: First point(s) ``[lat, lon]`` in degrees, shape ``(..., 2)``.
@@ -46,12 +55,12 @@ def meters_to_degrees(
     disp_m: Float[Array, "... 2"],
     lat_deg: Float[Array, ""],
 ) -> Float[Array, "... 2"]:
-    """Convert a ``[north, east]`` displacement in metres to ``[dlat, dlon]`` in degrees.
+    r"""Convert a ``[north, east]`` displacement in metres to ``[dlat, dlon]`` in degrees.
 
     Uses a flat-Earth approximation around ``lat_deg``: the meridional
-    component is converted via ``EARTH_RADIUS``; the zonal component is
-    additionally divided by ``cos(lat)`` to account for shrinking longitude
-    circles toward the poles.
+    component is converted via :data:`EARTH_RADIUS`; the zonal component is
+    additionally divided by :math:`\cos(\mathrm{lat})` to account for shrinking
+    longitude circles toward the poles.
 
     Args:
         disp_m: Displacement(s) ``[north, east]`` in **metres**. The last axis

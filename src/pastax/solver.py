@@ -1,4 +1,4 @@
-"""ODE and SDE solvers with a unified lax.scan integration loop.
+r"""ODE and SDE solvers with a unified lax.scan integration loop.
 
 Solver lineup
 -------------
@@ -29,9 +29,10 @@ ODE term: ``f(t, y, args[, ctrl]) -> Float[Array, "2"]`` returns velocity
 
 SDE term: ``f(t, y, args[, ctrl]) -> tuple[Float[Array, "2"], Float[Array, "..."]]``
 returns ``(drift, g)``. ``drift`` is the deterministic velocity and ``g`` is
-the diffusion coefficient — the solver applies it as ``dy = drift*dt + g*dW``
-with ``dW = sqrt(|dt|) * z`` and ``z ~ N(0, I_2)`` drawn internally. The term
-never receives ``z``. Two ``g`` shapes are accepted:
+the diffusion coefficient — the solver applies it as
+:math:`dy = \mathrm{drift}\,dt + g\,dW` with :math:`dW = \sqrt{|dt|}\,z` and
+:math:`z \sim \mathcal{N}(0, I_2)` drawn internally. The term never receives
+``z``. Two ``g`` shapes are accepted:
 
 - ``g.shape == (2,)`` — diagonal noise, noise step is ``g * dW`` componentwise.
 - ``g.shape == (2, 2)`` — full 2×2 noise, noise step is ``g @ dW``.
@@ -44,8 +45,9 @@ to the term. The term owns all interpretation and scaling of the slice.
 
 Noise convention
 ----------------
-Per-step Wiener increment is ``dW = sqrt(|dt|) * z`` with ``z ~ N(0, I_2)``
-drawn internally; the SDE term never sees ``z``. Passing ``key`` to
+Per-step Wiener increment is :math:`dW = \sqrt{|dt|}\,z` with
+:math:`z \sim \mathcal{N}(0, I_2)` drawn internally; the SDE term never sees
+``z``. Passing ``key`` to
 :func:`solve` activates SDE mode. A single trajectory is produced by default;
 pass ``n_samples > 1`` for an ensemble of independent realisations (returns
 shape ``(n_samples, n_save+1, 2)`` via internal vmap over split keys).
@@ -53,7 +55,7 @@ shape ``(n_samples, n_save+1, 2)`` via internal vmap over split keys).
 Backwards-in-time integration is supported for all solvers: pass a negative
 ``int_dt`` (and matching negative ``save_dt``) to :func:`solve`. SDE backwards
 integration is not a textbook construction, but remains finite because the
-solver sign-abs-normalises the ``sqrt(dt)`` factor.
+solver sign-abs-normalises the :math:`\sqrt{dt}` factor.
 """
 
 from __future__ import annotations
@@ -141,7 +143,7 @@ class AbstractSolver(eqx.Module):
         ctrl: PyTree,
         z: Float[Array, "n_noise"],
     ) -> Float[Array, "2"]:
-        """Advance the SDE state by one step using a pre-sampled ``z``.
+        r"""Advance the SDE state by one step using a pre-sampled ``z``.
 
         Args:
             term: Stochastic dynamics callable ``f(t, y, args) -> (drift, g)``.
@@ -155,7 +157,7 @@ class AbstractSolver(eqx.Module):
             args: Arbitrary fixed Pytree forwarded to ``term``.
             ctrl: Arbitrary time-varying Pytree forwarded to ``term``.
             z: Standard-normal noise sample of shape ``(n_noise,)``. The Wiener
-                increment used by the solver is ``dW = sqrt(|dt|) * z``.
+                increment used by the solver is :math:`dW = \sqrt{|dt|}\,z`.
 
         Returns:
             Updated state ``[lat, lon]`` in degrees after one step.
@@ -188,7 +190,7 @@ class Euler(AbstractSolver):
         ctrl: PyTree,
         z: Float[Array, "n_noise"],
     ) -> Float[Array, "2"]:
-        """One Euler–Maruyama step: ``y + drift*dt + g*dW``."""
+        r"""One Euler–Maruyama step: :math:`y + \mathrm{drift}\,dt + g\,dW`."""
         f, g = term(t, y, args, ctrl)
         dW = jnp.sqrt(jnp.abs(dt)) * z
         return y + f * dt + _apply_g(g, dW)
@@ -479,10 +481,11 @@ def _milstein_correction(
     g: Float[Array, "2"],
     dW: Float[Array, "n_noise"],
 ) -> Float[Array, "2"]:
-    """Diagonal-noise Milstein cross-term ``0.5 * g * (∂g/∂y_i) * dW^2``.
+    r"""Diagonal-noise Milstein cross-term :math:`\tfrac12\,g\,(\partial g_i/\partial y_i)\,dW^2`.
 
-    Returns the ``0.5 * g * (∂g_i/∂y_i) * dW**2`` vector (Stratonovich form).
-    Itô subtracts ``0.5 * g * (∂g_i/∂y_i) * dt`` on top.
+    Returns the :math:`\tfrac12\,g\,(\partial g_i/\partial y_i)\,dW^2` vector
+    (Stratonovich form). Itô subtracts
+    :math:`\tfrac12\,g\,(\partial g_i/\partial y_i)\,dt` on top.
     """
     def g_fn(y_):
         _, g_out = term(t, y_, args, ctrl)
@@ -524,7 +527,7 @@ class ItoMilstein(AbstractSolver):
         ctrl: PyTree,
         z: Float[Array, "n_noise"],
     ) -> Float[Array, "2"]:
-        """One Itô Milstein step: ``y + f*dt + g*dW + 0.5*g*(∂g/∂y)*(dW**2 - dt)``."""
+        r"""One Itô Milstein step: :math:`y + f\,dt + g\,dW + \tfrac12\,g\,(\partial g/\partial y)\,(dW^2 - dt)`."""
         f, g = term(t, y, args, ctrl)
         if g.ndim != 1:
             raise NotImplementedError(
@@ -542,10 +545,11 @@ class ItoMilstein(AbstractSolver):
 
 
 class StratonovichMilstein(AbstractSolver):
-    """Stratonovich Milstein solver (SDE-only, diagonal noise, strong order 1.0).
+    r"""Stratonovich Milstein solver (SDE-only, diagonal noise, strong order 1.0).
 
     Requires ``g.shape == (2,)``. Differs from :class:`ItoMilstein` by the
-    absence of the ``-0.5 * g * (∂g/∂y) * dt`` Itô-to-Stratonovich correction.
+    absence of the :math:`-\tfrac12\,g\,(\partial g/\partial y)\,dt`
+    Itô-to-Stratonovich correction.
     """
 
     def ode_step(
@@ -572,7 +576,7 @@ class StratonovichMilstein(AbstractSolver):
         ctrl: PyTree,
         z: Float[Array, "n_noise"],
     ) -> Float[Array, "2"]:
-        """One Stratonovich Milstein step: ``y + f*dt + g*dW + 0.5*g*(∂g/∂y)*dW**2``."""
+        r"""One Stratonovich Milstein step: :math:`y + f\,dt + g\,dW + \tfrac12\,g\,(\partial g/\partial y)\,dW^2`."""
         f, g = term(t, y, args, ctrl)
         if g.ndim != 1:
             raise NotImplementedError(
@@ -708,12 +712,13 @@ def solve(
     adjoint: str = "checkpointed",
     checkpoints: int | str | None = None,
 ) -> Array:
-    """Integrate a trajectory for ``n_save`` output intervals starting at ``t0``.
+    r"""Integrate a trajectory for ``n_save`` output intervals starting at ``t0``.
 
     ODE mode (default, no ``key``): ``term(t, y[, args, ctrl])`` returns ``velocity``.
     SDE mode (pass ``key``): ``term(t, y[, args, ctrl])`` returns ``(drift, g)``;
-    the solver draws ``z ~ N(0, I_2)`` and applies ``dW = sqrt(|int_dt|) * z``
-    internally. The optional ``ctrl`` argument is present when ``controls`` is
+    the solver draws :math:`z \sim \mathcal{N}(0, I_2)` and applies
+    :math:`dW = \sqrt{|\mathrm{int\_dt}|}\,z` internally. The optional ``ctrl``
+    argument is present when ``controls`` is
     provided — the solver slices it at each step; the term owns its interpretation.
 
     The solver runs on a fine integration grid of ``n_fine = n_save * n_substeps``
@@ -741,8 +746,9 @@ def solve(
         args: Arbitrary fixed Pytree passed through to term (e.g. a Dataset).
         controls: Arbitrary per-step Pytree with leading axis ``n_fine``. Sliced at each
             integration step.
-        key: PRNG key for SDE mode. When provided, draws ``z ~ N(0, I_2)`` of
-            shape ``(n_fine, 2)`` and runs in SDE mode.
+        key: PRNG key for SDE mode. When provided, draws
+            :math:`z \sim \mathcal{N}(0, I_2)` of shape ``(n_fine, 2)`` and runs
+            in SDE mode.
         n_samples: Number of independent SDE realisations (default 1). Ignored in
             ODE mode. When > 1, the key is split and trajectories are vmapped;
             output shape is ``(n_samples, n_save + 1, 2)``.
