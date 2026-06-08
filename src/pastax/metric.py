@@ -1,6 +1,16 @@
-"""Along-trajectory metrics for evaluating Lagrangian simulation quality."""
+"""Along-trajectory metrics for evaluating Lagrangian simulation quality.
 
-import jax
+Every metric here is a *broadcasting* function of two trajectories,
+``f(y, y_ref)``, whose last two axes are ``(time, 2)`` and whose leading axes
+broadcast under standard NumPy/JAX rules. A metric therefore works
+transparently on a single trajectory ``(T, 2)``, an ensemble ``(S, T, 2)``, or
+any batched/broadcast pair — no ``ensemble`` flag required.
+
+Because they satisfy the same broadcasting contract as the kernels in
+:mod:`pastax.score`, these metrics double as energy-score kernels, e.g.
+``energy_score(forecast, obs, kernel=liu_index, reduce="last")``.
+"""
+
 import jax.numpy as jnp
 
 from ._safe_math import safe_divide
@@ -14,87 +24,75 @@ __all__ = [
 ]
 
 
-def _arc_lengths(traj: Float[Array, "time 2"]) -> Float[Array, " time"]:
-    """Step-by-step great-circle arc lengths of a trajectory in metres.
+def _cumulative_reference_length(
+    y_ref: Float[Array, "*#batch time 2"],
+) -> Float[Array, "*#batch time"]:
+    """Cumulative arc length of the reference trajectory, ``l_{o,i}``.
 
-    Returns shape (T,); element 0 is always 0 (no step before the first point).
+    ``l_{o,i}`` is the path length from the start to step ``i``; element 0 is 0
+    (no step precedes the first point). Broadcasts over leading axes.
     """
-    dists = jax.vmap(haversine)(traj[:-1], traj[1:])
-    return jnp.concatenate([jnp.zeros((1,), dtype=dists.dtype), dists])
+    steps = haversine(y_ref[..., 1:, :], y_ref[..., :-1, :])  # (..., time - 1)
+    zero = jnp.zeros(steps.shape[:-1] + (1,), dtype=steps.dtype)
+    return jnp.concatenate([zero, jnp.cumsum(steps, axis=-1)], axis=-1)
 
 
 def separation_distance(
-    y: Float[Array, "* time 2"],
-    y_ref: Float[Array, "time 2"],
-    *,
-    ensemble: bool = False,
-) -> Float[Array, "* time"]:
-    """Point-wise great-circle distance between predicted and reference trajectories.
+    y: Float[Array, "*batch time 2"],
+    y_ref: Float[Array, "*#batch time 2"],
+) -> Float[Array, "*batch time"]:
+    """Point-wise great-circle distance between ``y`` and ``y_ref``.
 
     Args:
-        y: Predicted trajectory, shape (T, 2). If ensemble=True, shape (S, T, 2).
-        y_ref: Reference trajectory, shape (T, 2).
-        ensemble: If True, y is treated as an ensemble of shape (S, T, 2) and the
-            metric is computed independently for each member via vmap.
+        y: Predicted trajectory/-ies, shape ``(..., T, 2)``.
+        y_ref: Reference trajectory, shape ``(..., T, 2)``; broadcasts against ``y``.
 
     Returns:
-        Distance at each time step in metres. Shape (T,) or (S, T).
+        Distance at each time step in metres, shape ``(..., T)``.
     """
-    if ensemble:
-        return jax.vmap(lambda yi: separation_distance(yi, y_ref, ensemble=False))(y)
-    return jax.vmap(haversine)(y, y_ref)
+    return haversine(y, y_ref)
 
 
 def normalized_separation_distance(
-    y: Float[Array, "* time 2"],
-    y_ref: Float[Array, "time 2"],
-    *,
-    ensemble: bool = False,
-) -> Float[Array, "* time"]:
-    """Instantaneous separation distance normalised by cumulative reference arc length.
+    y: Float[Array, "*batch time 2"],
+    y_ref: Float[Array, "*#batch time 2"],
+) -> Float[Array, "*batch time"]:
+    """Instantaneous separation normalised by cumulative reference arc length.
 
-    Defined as: sep_dist(t) / cumsum(arc_length_ref)[t].
+    ``nsd_t = d_t / l_{o,t}``, where ``d_t`` is the separation distance at step
+    ``t`` and ``l_{o,t}`` is the cumulative reference length at step ``t``.
 
     Args:
-        y: Predicted trajectory, shape (T, 2). If ensemble=True, shape (S, T, 2).
-        y_ref: Reference trajectory, shape (T, 2).
-        ensemble: If True, vmaps over the first (sample) axis.
+        y: Predicted trajectory/-ies, shape ``(..., T, 2)``.
+        y_ref: Reference trajectory, shape ``(..., T, 2)``; broadcasts against ``y``.
 
     Returns:
-        Normalised separation (dimensionless). Shape (T,) or (S, T).
+        Dimensionless normalised separation, shape ``(..., T)``.
     """
-    if ensemble:
-        return jax.vmap(
-            lambda yi: normalized_separation_distance(yi, y_ref, ensemble=False)
-        )(y)
-    sep = separation_distance(y, y_ref)
-    cum_ref_len = jnp.cumsum(_arc_lengths(y_ref))
-    return safe_divide(sep, cum_ref_len)
+    return safe_divide(haversine(y, y_ref), _cumulative_reference_length(y_ref))
 
 
 def liu_index(
-    y: Float[Array, "* time 2"],
-    y_ref: Float[Array, "time 2"],
-    *,
-    ensemble: bool = False,
-) -> Float[Array, "* time"]:
-    """Liu Index: cumulative separation normalised by cumulative reference arc length.
+    y: Float[Array, "*batch time 2"],
+    y_ref: Float[Array, "*#batch time 2"],
+) -> Float[Array, "*batch time"]:
+    """Liu & Weisberg (2011) normalised cumulative Lagrangian separation.
 
-    Defined as: cumsum(sep_dist)[t] / cumsum(arc_length_ref)[t].
+    ``liu_t = (sum_{i<=t} d_i) / (sum_{i<=t} l_{o,i})``, where ``d_i`` is the
+    separation distance at step ``i`` and ``l_{o,i}`` is the *cumulative*
+    reference trajectory length at step ``i``. The denominator is thus a double
+    cumulative sum of the per-step distances (the cumulative sum of the
+    cumulative length).
 
     Reference: Liu & Weisberg (2011), J. Geophys. Res.
 
     Args:
-        y: Predicted trajectory, shape (T, 2). If ensemble=True, shape (S, T, 2).
-        y_ref: Reference trajectory, shape (T, 2).
-        ensemble: If True, vmaps over the first (sample) axis.
+        y: Predicted trajectory/-ies, shape ``(..., T, 2)``.
+        y_ref: Reference trajectory, shape ``(..., T, 2)``; broadcasts against ``y``.
 
     Returns:
-        Liu Index (dimensionless). Shape (T,) or (S, T).
+        Dimensionless Liu Index, shape ``(..., T)``.
     """
-    if ensemble:
-        return jax.vmap(lambda yi: liu_index(yi, y_ref, ensemble=False))(y)
-    sep = separation_distance(y, y_ref)
-    cum_sep = jnp.cumsum(sep)
-    cum_ref_len = jnp.cumsum(_arc_lengths(y_ref))
-    return safe_divide(cum_sep, cum_ref_len)
+    cumulative_separation = jnp.cumsum(haversine(y, y_ref), axis=-1)
+    cumulative_length = jnp.cumsum(_cumulative_reference_length(y_ref), axis=-1)
+    return safe_divide(cumulative_separation, cumulative_length)

@@ -31,13 +31,13 @@ class TestSeparationDistance:
     def test_ensemble_flag_shape(self):
         ensemble = jnp.ones((4, 10, 2))
         y_ref = jnp.zeros((10, 2))
-        dists = separation_distance(ensemble, y_ref, ensemble=True)
+        dists = separation_distance(ensemble, y_ref)
         assert dists.shape == (4, 10)
 
     def test_ensemble_consistent_with_manual_vmap(self):
         ensemble = jnp.ones((3, 5, 2)) * 0.1
         y_ref = jnp.zeros((5, 2))
-        auto = separation_distance(ensemble, y_ref, ensemble=True)
+        auto = separation_distance(ensemble, y_ref)
         manual = jax.vmap(lambda y: separation_distance(y, y_ref))(ensemble)
         assert jnp.allclose(auto, manual)
 
@@ -60,7 +60,7 @@ class TestNormalizedSeparationDistance:
     def test_ensemble_flag_shape(self):
         ensemble = jnp.ones((5, 6, 2))
         y_ref = jnp.zeros((6, 2))
-        result = normalized_separation_distance(ensemble, y_ref, ensemble=True)
+        result = normalized_separation_distance(ensemble, y_ref)
         assert result.shape == (5, 6)
 
 
@@ -88,12 +88,12 @@ class TestLiuIndex:
     def test_ensemble_flag_shape(self):
         ensemble = jnp.ones((3, 7, 2)) * 0.2
         y_ref = jnp.zeros((7, 2))
-        result = liu_index(ensemble, y_ref, ensemble=True)
+        result = liu_index(ensemble, y_ref)
         assert result.shape == (3, 7)
 
     def test_ensemble_consistent_with_manual_vmap(self):
         ensemble = jnp.ones((4, 5, 2)) * 0.1
         y_ref = jnp.zeros((5, 2))
-        auto = liu_index(ensemble, y_ref, ensemble=True)
+        auto = liu_index(ensemble, y_ref)
         manual = jax.vmap(lambda y: liu_index(y, y_ref))(ensemble)
         assert jnp.allclose(auto, manual)
