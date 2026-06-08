@@ -262,11 +262,12 @@ class Dataset(eqx.Module):
         slip_a: float = 0.5,
         slip_b: float = 0.5,
     ) -> Float[Array, "2"]:
-        """Interpolate the ``(U, V)`` velocity vector at a single point.
+        r"""Interpolate the ``(U, V)`` velocity vector at a single point.
 
         Returns ``[v_value, u_value]`` so the result can be used directly
-        as the ``[dlat/dt, dlon/dt]`` part of a solver term (after the
-        usual metres-to-degrees conversion if applicable).
+        as the :math:`[\mathrm{d}lat/\mathrm{d}t,\ \mathrm{d}lon/\mathrm{d}t]`
+        part of a solver term (after the usual metres-to-degrees conversion if
+        applicable).
 
         Args:
             t: Query time in seconds.
@@ -283,10 +284,12 @@ class Dataset(eqx.Module):
                   together with their joint land mask (the AND of both
                   fields' masks) and applies a wall-slip correction
                   whenever a full cell edge is land:
-                  ``U`` is rescaled by ``(slip_a + slip_b * wl)`` near a
-                  latitudinal coast and ``V`` by ``(slip_a + slip_b * wj)``
-                  near a longitudinal coast. The default ``a = b = 0.5``
-                  gives a half-slip wall; ``a = 1, b = 0`` recovers
+                  ``U`` is rescaled by
+                  :math:`(\mathrm{slip\_a} + \mathrm{slip\_b}\,w_l)` near a
+                  latitudinal coast and ``V`` by
+                  :math:`(\mathrm{slip\_a} + \mathrm{slip\_b}\,w_j)`
+                  near a longitudinal coast. The default :math:`a = b = 0.5`
+                  gives a half-slip wall; :math:`a = 1,\ b = 0` recovers
                   full free-slip. Requires both U and V to carry a mask;
                   raises ``ValueError`` otherwise. Raises
                   ``NotImplementedError`` on Arakawa C-grid datasets.

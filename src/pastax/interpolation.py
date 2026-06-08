@@ -83,7 +83,7 @@ def bilinear_interp_2d(
     lon_period: float | None = None,
     mask: Bool[Array, "lat lon"] | None = None,
 ) -> Float[Array, ""]:
-    """Bilinearly interpolate a 2-D field on an equally-spaced rectilinear grid.
+    r"""Bilinearly interpolate a 2-D field on an equally-spaced rectilinear grid.
 
     Args:
         values: Field values, shape ``(n_lat, n_lon)``.
@@ -104,13 +104,14 @@ def bilinear_interp_2d(
               to the ``mask=None`` path).
             * Mixed corners → inverse-distance partial-cell weighting on the
               ocean corners in normalised cell coordinates
-              (``d² = α² + β² + ε`` where ``α``, ``β`` are the fractional
-              distances along the cell axes); land corners are dropped.
+              (:math:`d^2 = \alpha^2 + \beta^2 + \varepsilon` where
+              :math:`\alpha`, :math:`\beta` are the fractional distances along
+              the cell axes); land corners are dropped.
             * All four corners land → returns ``0`` (zero velocity for
               fully-grounded cells).
 
-            The ``ε`` floor and :func:`safe_divide` keep both forward and
-            backward passes finite for queries on or near a corner.
+            The :math:`\varepsilon` floor and :func:`safe_divide` keep both
+            forward and backward passes finite for queries on or near a corner.
 
     Returns:
         Interpolated scalar value at ``(lat, lon)``.
@@ -227,24 +228,30 @@ def bilinear_velocity_partialslip_2d(
     slip_b: float = 0.5,
     lon_period: float | None = None,
 ) -> tuple[Float[Array, ""], Float[Array, ""]]:
-    """Bilinear A-grid velocity interpolation with partial-slip wall correction.
+    r"""Bilinear A-grid velocity interpolation with partial-slip wall correction.
 
     Replaces the standard bilinear weights for ``U`` (tangential to a
     latitudinal coast) and ``V`` (tangential to a longitudinal coast) with
     a wall-slip-aware formula whenever an entire cell edge is land.
 
     For a south-edge-fully-land cell with the north edge in the ocean, the
-    naive bilinear for ``U`` is ``wl * U_along_N`` where
-    ``U_along_N = (1-wj) U_NW + wj U_NE`` is the linear interpolation of
-    ``U`` along the north (ocean) edge. The partial-slip correction
-    replaces this with ``(a + b * wl) * U_along_N``: at the coast
-    (``wl = 0``) the tangential velocity is ``a * U_along_N`` rather than
-    ``0`` (which would trap the particle). The default ``a = b = 0.5``
-    gives a half-slip wall; ``a = 1, b = 0`` recovers full free-slip;
-    ``a = 0, b = 1`` recovers the no-slip naive bilinear.
+    naive bilinear for ``U`` is :math:`w_l\,U_{\mathrm{along}\,N}` where
 
-    Symmetrically for north-edge-land cells (using ``U_along_S`` and
-    ``(a + b * (1 - wl))``) and for ``V`` across east/west land edges.
+    .. math::
+
+        U_{\mathrm{along}\,N} = (1 - w_j)\,U_{NW} + w_j\,U_{NE}
+
+    is the linear interpolation of ``U`` along the north (ocean) edge. The
+    partial-slip correction replaces this with
+    :math:`(a + b\,w_l)\,U_{\mathrm{along}\,N}`: at the coast
+    (:math:`w_l = 0`) the tangential velocity is
+    :math:`a\,U_{\mathrm{along}\,N}` rather than :math:`0` (which would trap
+    the particle). The default :math:`a = b = 0.5` gives a half-slip wall;
+    :math:`a = 1,\ b = 0` recovers full free-slip; :math:`a = 0,\ b = 1`
+    recovers the no-slip naive bilinear.
+
+    Symmetrically for north-edge-land cells (using :math:`U_{\mathrm{along}\,S}`
+    and :math:`a + b\,(1 - w_l)`) and for ``V`` across east/west land edges.
     Cells without a fully-land edge fall back to standard bilinear.
 
     Args:

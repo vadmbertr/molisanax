@@ -57,12 +57,16 @@ class Grid(eqx.Module):
     lon_period: float | None = eqx.field(static=True, default=None)
 
     def u_face_coords(self) -> tuple[Float[Array, "lat"], Float[Array, "lon_u"]]:
-        """Return ``(lat_u, lon_u)`` — coordinates of U-face centres (NEMO C-grid).
+        r"""Return ``(lat_u, lon_u)`` — coordinates of U-face centres (NEMO C-grid).
 
         For a centre grid of size ``nlon`` in longitude, U lives on the
         ``nlon - 1`` east faces between adjacent cells:
-        ``lon_u[i] = (lon_c[i] + lon_c[i+1]) / 2``. Latitude is unchanged:
-        ``lat_u = lat_c``.
+
+        .. math::
+
+            \mathrm{lon}_u[i] = \tfrac{1}{2}\left(\mathrm{lon}_c[i] + \mathrm{lon}_c[i+1]\right)
+
+        Latitude is unchanged: :math:`\mathrm{lat}_u = \mathrm{lat}_c`.
 
         Raises:
             NotImplementedError: For curvilinear grids.
@@ -73,12 +77,16 @@ class Grid(eqx.Module):
         return self.lat_coords, lon_u
 
     def v_face_coords(self) -> tuple[Float[Array, "lat_v"], Float[Array, "lon"]]:
-        """Return ``(lat_v, lon_v)`` — coordinates of V-face centres (NEMO C-grid).
+        r"""Return ``(lat_v, lon_v)`` — coordinates of V-face centres (NEMO C-grid).
 
         For a centre grid of size ``nlat`` in latitude, V lives on the
         ``nlat - 1`` north faces between adjacent cells:
-        ``lat_v[j] = (lat_c[j] + lat_c[j+1]) / 2``. Longitude is unchanged:
-        ``lon_v = lon_c``.
+
+        .. math::
+
+            \mathrm{lat}_v[j] = \tfrac{1}{2}\left(\mathrm{lat}_c[j] + \mathrm{lat}_c[j+1]\right)
+
+        Longitude is unchanged: :math:`\mathrm{lon}_v = \mathrm{lon}_c`.
 
         Raises:
             NotImplementedError: For curvilinear grids.

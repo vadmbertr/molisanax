@@ -51,9 +51,12 @@ def normalized_separation_distance(
     *,
     ensemble: bool = False,
 ) -> Float[Array, "* time"]:
-    """Instantaneous separation distance normalised by cumulative reference arc length.
+    r"""Instantaneous separation distance normalised by cumulative reference arc length.
 
-    Defined as: sep_dist(t) / cumsum(arc_length_ref)[t].
+    .. math::
+
+        \mathrm{NSD}(t) = \frac{\mathrm{sep\_dist}(t)}
+        {\operatorname{cumsum}(\mathrm{arc\_length\_ref})[t]}
 
     Args:
         y: Predicted trajectory, shape (T, 2). If ensemble=True, shape (S, T, 2).
@@ -78,9 +81,12 @@ def liu_index(
     *,
     ensemble: bool = False,
 ) -> Float[Array, "* time"]:
-    """Liu Index: cumulative separation normalised by cumulative reference arc length.
+    r"""Liu Index: cumulative separation normalised by cumulative reference arc length.
 
-    Defined as: cumsum(sep_dist)[t] / cumsum(arc_length_ref)[t].
+    .. math::
+
+        \mathrm{Liu}(t) = \frac{\operatorname{cumsum}(\mathrm{sep\_dist})[t]}
+        {\operatorname{cumsum}(\mathrm{arc\_length\_ref})[t]}
 
     Reference: Liu & Weisberg (2011), J. Geophys. Res.
 
