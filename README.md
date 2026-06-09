@@ -12,7 +12,7 @@
 - A-grid and NEMO-convention Arakawa C-grid forcing layouts (`Dataset.from_arrays_cgrid` / `from_xarray_cgrid`)
 - Coastal robustness on A-grid: NaN-inferred land masks, inverse-distance partial-cell bilinear, and an opt-in partial-slip scheme via `Dataset.velocity_interp`
 - Unified `solve` function — ODE / ODE-with-controls / SDE mode selected by caller
-- Unified `term` API for specifying the dynamics. ODE terms have signature `term(t, y[, args, ctrl]) -> velocity`. SDE terms have signature `term(t, y[, args, ctrl]) -> (drift, g)`. `args` is a Pytree fixed for the entire integration; `ctrl` is a per-step time-varying Pytree, useful when the term requires external time-varying inputs
+- Unified `term` API for specifying the dynamics. The state `y` may be any PyTree (a bare array is the single-leaf case). ODE terms have signature `term(t, y[, args, ctrl]) -> dy` (same structure as `y`). SDE terms have signature `term(t, y[, args, ctrl]) -> (drift, diffusion)`, where `diffusion` is a diagonal PyTree, a matrix, or a `lineax` operator. `args` is a Pytree fixed for the entire integration; `ctrl` is a per-step time-varying Pytree, useful when the term requires external time-varying inputs. PyTree states make second-order dynamics (`dv = f dt + noise`, `dx = v dt`) natural
 - ODE solvers: Euler, Heun, RK4, Tsit5, Dopri5. SDE solvers: Euler-Maruyama, Stratonovich Heun, Stratonovich RK4 via the ODE classes, plus dedicated EulerHeun, ItoMilstein, and StratonovichMilstein; SDE solvers draw `z ~ N(0, I_2)` and applies `dW = sqrt(int_dt) * z` internally
 - Forward or backwards-in-time integration (pass negative `int_dt` / `save_dt`)
 - Geographic unit conversions (metres ↔ degrees)
@@ -101,11 +101,48 @@ ensemble = solve(sde_term, y0, t0, 120, 3600., 3600., EulerHeun(), args=dataset,
 # shapes: (121, 2) and (100, 121, 2)
 ```
 
-In SDE mode the solver draws `z ~ N(0, I_2)` and applies `dW = sqrt(int_dt) * z`
-internally; the term never sees `z`. `g` can be shape `(2,)` (diagonal) or
-`(2, 2)` (full matrix). The `Euler`, `Heun`, and `RK4` solvers accept both ODE
-and SDE mode; `ItoMilstein` / `StratonovichMilstein` give strong order 1.0 for
-diagonal `g` via `jax.jacfwd`.
+In SDE mode the solver draws a standard-normal `z` and applies
+`dW = sqrt(int_dt) * z` internally; the term never sees `z`. For a flat state `g`
+can be shape `(2,)` (diagonal) or `(2, 2)` (full matrix). The `Euler`, `Heun`,
+and `RK4` solvers accept both ODE and SDE mode; `ItoMilstein` /
+`StratonovichMilstein` give strong order 1.0 for diagonal `g` via `jax.jacfwd`.
+
+### PyTree state and second-order dynamics
+
+The state `y` can be any PyTree (a bare array is the single-leaf case). The term
+returns the time derivative `dy` with the **same structure** as `y`, and the
+output trajectory is a PyTree shaped like `y0` with a leading time axis on each
+leaf. This makes **second-order** dynamics natural — `dv = f(x, t) dt + noise`,
+`dx = v dt` — by carrying `y = (x, v)` and putting the noise on the velocity leaf:
+
+```python
+from typing import NamedTuple
+import jax.numpy as jnp
+import jax.random as jr
+from pastax import solve, EulerHeun
+
+class State(NamedTuple):
+    x: jnp.ndarray   # position [lat, lon]    (deg)
+    v: jnp.ndarray   # velocity [v_lat, v_lon] (deg/s)
+
+def sde_term(t, y):
+    accel = -(y.v - u_current(t, y.x)) / tau          # your f(x, t[, v]); deg/s^2
+    drift = State(x=y.v, v=accel)                      # dx = v, dv = accel
+    diff  = State(x=jnp.zeros(2), v=jnp.full(2, 1e-5)) # diagonal noise on velocity only
+    return drift, diff
+
+y0   = State(x=jnp.array([48.0, -4.0]), v=jnp.zeros(2))
+traj = solve(sde_term, y0, jnp.array(0.0), 120, 3600., 3600., EulerHeun(), key=jr.key(0))
+# traj.x, traj.v each have shape (121, 2)   — underdamped Langevin: dx=v dt, dv=accel dt + g dW
+```
+
+For a general (matrix / cross-leaf) diffusion, return a
+[`lineax`](https://github.com/patrick-kidger/lineax) `AbstractLinearOperator` as
+the diffusion (applied via `.mv(dW)`); pass `brownian_structure=` (a PyTree of
+`jax.ShapeDtypeStruct`) when the noise space differs from the state space. This
+needs the optional `lineax` dependency (`pip install "pastax[sde]"`); the diagonal
+per-leaf form above needs no extra dependency. The Milstein solvers remain flat
+array only.
 
 ### Loading forcing fields from xarray
 
