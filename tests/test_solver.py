@@ -654,3 +654,154 @@ class TestStratonovichMilstein:
                      StratonovichMilstein(), key=jax.random.key(0))
         assert traj.shape == (11, 2)
         assert jnp.all(jnp.isfinite(traj))
+
+
+# ---------------------------------------------------------------------------
+# PyTree state: second-order dynamics  (dv = f dt + noise, dx = v dt)
+# ---------------------------------------------------------------------------
+
+from typing import NamedTuple  # noqa: E402
+
+
+class State(NamedTuple):
+    x: jnp.ndarray  # position
+    v: jnp.ndarray  # velocity
+
+
+def _second_order_ode_term(accel):
+    # dx = v, dv = accel(x, v)
+    def term(t, y, *args):
+        return State(x=y.v, v=accel(y.x, y.v))
+    return term
+
+
+def _second_order_sde_term(accel, sigma):
+    # drift = (v, accel); diagonal diffusion on the velocity leaf only
+    def term(t, y, *args):
+        drift = State(x=y.v, v=accel(y.x, y.v))
+        diff = State(x=jnp.zeros_like(y.x), v=jnp.full_like(y.v, sigma))
+        return drift, diff
+    return term
+
+
+class TestPyTreeStateODE:
+    def test_free_particle_matches_closed_form(self):
+        # accel = 0, constant velocity -> x(t) = x0 + v0 t.
+        x0 = jnp.array([10.0, 20.0])
+        v0 = jnp.array([1e-3, -2e-3])
+        y0 = State(x=x0, v=v0)
+        n_save, dt = 50, 10.0
+        T = n_save * dt
+        traj = solve(_second_order_ode_term(lambda x, v: jnp.zeros_like(v)),
+                     y0, jnp.array(0.0), n_save, dt, dt, RK4())
+        assert isinstance(traj, State)
+        assert traj.x.shape == (n_save + 1, 2)
+        assert traj.v.shape == (n_save + 1, 2)
+        assert jnp.allclose(traj.x[-1], x0 + v0 * T, atol=1e-6)
+        assert jnp.allclose(traj.v, v0[None], atol=1e-8)  # velocity unchanged
+
+    def test_harmonic_oscillator_energy_bounded(self):
+        # accel = -omega^2 x ; RK4 should keep the orbit bounded over one period.
+        omega = 0.2
+        y0 = State(x=jnp.array([1.0, 0.0]), v=jnp.array([0.0, 0.0]))
+        traj = solve(_second_order_ode_term(lambda x, v: -(omega ** 2) * x),
+                     y0, jnp.array(0.0), 200, 0.05, 0.05, RK4())
+        radius = jnp.sqrt(traj.x[:, 0] ** 2 + (traj.v[:, 0] / omega) ** 2)
+        assert jnp.allclose(radius, radius[0], atol=1e-3)
+
+    def test_jit_and_grad_through_pytree_state(self):
+        y0 = State(x=jnp.array([0.0, 0.0]), v=jnp.array([1.0, 0.0]))
+
+        def loss(v0x):
+            y0_ = State(x=y0.x, v=y0.v.at[0].set(v0x))
+            traj = solve(_second_order_ode_term(lambda x, v: jnp.zeros_like(v)),
+                         y0_, jnp.array(0.0), 10, 1.0, 1.0, RK4())
+            return traj.x[-1, 0]
+
+        g = jax.grad(jax.jit(loss))(2.0)
+        assert float(g) == pytest.approx(10.0, abs=1e-5)  # d x_T / d v0 = T
+
+
+class TestPyTreeStateSDE:
+    def test_zero_noise_matches_ode(self):
+        def accel(x, v):
+            return -0.01 * v
+        y0 = State(x=jnp.array([0.0, 0.0]), v=jnp.array([0.1, -0.2]))
+        # With sigma=0, EulerHeun reduces to a first-order Euler drift step, so
+        # compare against the matching Euler ODE integrator.
+        sde = solve(_second_order_sde_term(accel, sigma=0.0), y0, jnp.array(0.0),
+                    20, 1.0, 1.0, EulerHeun(), key=jax.random.key(0))
+        ode = solve(_second_order_ode_term(accel), y0, jnp.array(0.0),
+                    20, 1.0, 1.0, Euler())
+        assert jnp.allclose(sde.x, ode.x, atol=1e-5)
+        assert jnp.allclose(sde.v, ode.v, atol=1e-5)
+
+    def test_noise_on_velocity_only_position_is_integral(self):
+        # With accel = 0 and diffusion only on v, position is the exact running
+        # integral of velocity: x_{k+1} = x_k + v_k * dt (Euler).
+        sigma = 0.3
+        dt = 1.0
+        y0 = State(x=jnp.zeros(2), v=jnp.zeros(2))
+        traj = solve(_second_order_sde_term(lambda x, v: jnp.zeros_like(v), sigma),
+                     y0, jnp.array(0.0), 30, dt, dt, Euler(), key=jax.random.key(1))
+        x, v = traj.x, traj.v
+        # reconstruct position from the (saved) velocity via forward Euler
+        recon = jnp.cumsum(jnp.concatenate([jnp.zeros((1, 2)), v[:-1] * dt], axis=0), axis=0)
+        assert jnp.allclose(x, recon, atol=1e-5)
+
+    def test_integrated_brownian_variance_grows(self):
+        # Position variance of integrated Brownian velocity grows super-linearly.
+        sigma = 0.5
+        y0 = State(x=jnp.zeros(2), v=jnp.zeros(2))
+        ens = solve(_second_order_sde_term(lambda x, v: jnp.zeros_like(v), sigma),
+                    y0, jnp.array(0.0), 40, 1.0, 1.0, Euler(),
+                    key=jax.random.key(2), n_samples=400)
+        var_x = ens.x[:, :, 0].var(axis=0)
+        assert var_x[-1] > var_x[len(var_x) // 2] > var_x[1]
+
+    def test_n_samples_shape(self):
+        y0 = State(x=jnp.zeros(2), v=jnp.zeros(2))
+        ens = solve(_second_order_sde_term(lambda x, v: jnp.zeros_like(v), 0.1),
+                    y0, jnp.array(0.0), 10, 1.0, 1.0, EulerHeun(),
+                    key=jax.random.key(0), n_samples=5)
+        assert ens.x.shape == (5, 11, 2)
+        assert ens.v.shape == (5, 11, 2)
+
+    def test_milstein_raises_on_pytree_state(self):
+        y0 = State(x=jnp.zeros(2), v=jnp.zeros(2))
+        with pytest.raises(NotImplementedError, match="flat array state"):
+            solve(_second_order_sde_term(lambda x, v: jnp.zeros_like(v), 0.1),
+                  y0, jnp.array(0.0), 5, 1.0, 1.0, ItoMilstein(), key=jax.random.key(0))
+
+
+class TestLineaxDiffusion:
+    def test_matrix_operator_equals_diagonal_when_diagonal(self):
+        lx = pytest.importorskip("lineax")
+        sigma = 0.2
+        y0 = jnp.array([0.0, 0.0])
+        key = jax.random.key(3)
+
+        def diag_term(t, y, *args):
+            return jnp.zeros(2), jnp.full(2, sigma)
+
+        def op_term(t, y, *args):
+            return jnp.zeros(2), lx.DiagonalLinearOperator(jnp.full(2, sigma))
+
+        traj_diag = solve(diag_term, y0, jnp.array(0.0), 10, 1.0, 1.0, EulerHeun(), key=key)
+        traj_op = solve(op_term, y0, jnp.array(0.0), 10, 1.0, 1.0, EulerHeun(), key=key)
+        assert jnp.allclose(traj_diag, traj_op, atol=1e-6)
+
+    def test_matrix_operator_with_explicit_brownian_structure(self):
+        lx = pytest.importorskip("lineax")
+        # 2-D state driven by a 3-D Brownian motion via a (2, 3) operator.
+        G = jnp.array([[1.0, 0.0, 0.5], [0.0, 1.0, 0.5]]) * 1e-2
+        y0 = jnp.zeros(2)
+        noise_proto = jax.ShapeDtypeStruct((3,), y0.dtype)
+
+        def op_term(t, y, *args):
+            return jnp.zeros(2), lx.MatrixLinearOperator(G)
+
+        traj = solve(op_term, y0, jnp.array(0.0), 10, 1.0, 1.0, EulerHeun(),
+                     key=jax.random.key(4), brownian_structure=noise_proto)
+        assert traj.shape == (11, 2)
+        assert jnp.all(jnp.isfinite(traj))
