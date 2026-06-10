@@ -78,7 +78,7 @@ import abc
 from typing import Callable
 
 import equinox as eqx
-import equinox.internal as eqxi  # pyright: ignore[reportMissingImports]  # checkpointed scan (treeverse) — same private API Diffrax uses
+import equinox.internal as eqxi  # pyright: ignore[reportMissingImports]  # checkpointed scan
 import jax
 import jax.numpy as jnp
 import jax.random as jr
